@@ -83,8 +83,8 @@ def build_client_config(private_key: str, peer_ip: str) -> str:
 def build_client_uri(conf_content: str) -> str:
     """Генерирует vpn:// ключ для приложения Amnezia VPN.
 
-    Ключ представляет собой base64-encoded JSON с конфигом внутри.
-    Пользователь вставляет его в Amnezia VPN: + → Вставить ключ.
+    AWG параметры обфускации передаются и в last_config, и отдельными полями —
+    Amnezia VPN читает именно отдельные поля при установке соединения.
     """
     data = {
         "containers": [
@@ -93,6 +93,16 @@ def build_client_uri(conf_content: str) -> str:
                 "awg": {
                     "last_config": conf_content,
                     "transport_proto": "udp",
+                    "port": str(settings.WG_SERVER_PORT),
+                    "junkPacketCount": str(settings.AWG_JC),
+                    "junkPacketMinSize": str(settings.AWG_JMIN),
+                    "junkPacketMaxSize": str(settings.AWG_JMAX),
+                    "initPacketJunkSize": str(settings.AWG_S1),
+                    "responsePacketJunkSize": str(settings.AWG_S2),
+                    "initPacketMagicHeader": str(settings.AWG_H1),
+                    "responsePacketMagicHeader": str(settings.AWG_H2),
+                    "underloadPacketMagicHeader": str(settings.AWG_H3),
+                    "transportPacketMagicHeader": str(settings.AWG_H4),
                 }
             }
         ],
