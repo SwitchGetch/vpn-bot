@@ -121,7 +121,7 @@ async def check_crypto_payments(bot: Bot) -> None:
                         plan_days=inv.plan_days,
                         charge_id=str(inv.cryptopay_invoice_id),
                     )
-                    uri = build_client_uri(config_text)
+                    uri = build_client_uri(priv_key, pub_key, peer_ip)
                     await bot.send_message(
                         inv.user_chat_id,
                         f"✅ <b>Оплата получена! Ключ готов.</b>\n\n"

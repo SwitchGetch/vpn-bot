@@ -305,7 +305,7 @@ async def payment_success(message: Message, state: FSMContext, session: AsyncSes
                 plan_days=plan_days,
                 charge_id=payment.telegram_payment_charge_id,
             )
-            uri = build_client_uri(config_text)
+            uri = build_client_uri(priv_key, pub_key, peer_ip)
             await message.answer(
                 f"✅ <b>Ключ готов!</b>\n\n"
                 f"Устройство: <b>{device_name}</b>\n"

@@ -8,14 +8,16 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str = "sqlite+aiosqlite:///vpn-bot.db"
 
-    WG_CONTAINER: str = "amnezia-wg2"
-    WG_INTERFACE: str = "wg0"
-    WG_CONFIG_PATH: str = "/opt/amnezia/awg/wg0.conf"
+    WG_CONTAINER: str = "amnezia-awg2"
+    WG_INTERFACE: str = "awg0"
+    WG_CONFIG_PATH: str = "/opt/amnezia/awg/awg0.conf"
     WG_SERVER_PUBLIC_IP: str
     WG_SERVER_PORT: int = 51820
     WG_SERVER_PUBLIC_KEY: str
     WG_SUBNET: str = "10.8.1.0/24"
     WG_DNS: str = "1.1.1.1"
+
+    AWG_I1: str = ""
 
     AWG_JC: int = 4
     AWG_JMIN: int = 40
@@ -24,10 +26,14 @@ class Settings(BaseSettings):
     AWG_S2: int = 0
     AWG_S3: int = 0
     AWG_S4: int = 0
-    AWG_H1: int = 1
-    AWG_H2: int = 2
-    AWG_H3: int = 3
-    AWG_H4: int = 4
+    AWG_H1_MIN: int = 1
+    AWG_H1_MAX: int = 2147483647
+    AWG_H2_MIN: int = 1
+    AWG_H2_MAX: int = 2147483647
+    AWG_H3_MIN: int = 1
+    AWG_H3_MAX: int = 2147483647
+    AWG_H4_MIN: int = 1
+    AWG_H4_MAX: int = 2147483647
 
     @field_validator("ADMIN_IDS", mode="before")
     @classmethod

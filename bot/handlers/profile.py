@@ -77,7 +77,7 @@ async def download_config(callback: CallbackQuery, session: AsyncSession) -> Non
         await callback.answer("Ключ не найден.", show_alert=True)
         return
 
-    uri = build_client_uri(cfg.config_text)
+    uri = build_client_uri(cfg.peer_private_key, cfg.peer_public_key, cfg.peer_ip)
     await callback.message.answer(
         f"📋 <b>Ключ для {cfg.device_name}</b>\n"
         f"Действителен до: <b>{cfg.expires_at.strftime('%d.%m.%Y')}</b>\n\n"

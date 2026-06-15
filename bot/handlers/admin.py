@@ -482,7 +482,7 @@ async def cb_send_config(callback: CallbackQuery, session: AsyncSession) -> None
         await callback.answer("Ключ не найден.", show_alert=True)
         return
     try:
-        uri = build_client_uri(cfg.config_text)
+        uri = build_client_uri(cfg.peer_private_key, cfg.peer_public_key, cfg.peer_ip)
         await callback.bot.send_message(
             user_chat_id,
             f"📋 <b>Ключ: {cfg.device_name}</b>\n"
@@ -631,7 +631,7 @@ async def cb_give_config_days(message: Message, state: FSMContext, session: Asyn
             pub_key, priv_key, peer_ip, config_text, plan_days,
         )
 
-        uri = build_client_uri(config_text)
+        uri = build_client_uri(priv_key, pub_key, peer_ip)
         await message.bot.send_message(
             target_chat_id,
             f"🎁 <b>Ключ выдан администратором</b>\n\n"

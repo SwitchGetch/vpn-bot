@@ -3,6 +3,8 @@ import base64
 import ipaddress
 import json
 import logging
+import struct
+import zlib
 
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.serialization import (
@@ -51,8 +53,17 @@ def allocate_ip(used_ips: set[str]) -> str:
 
 
 def build_client_config(private_key: str, peer_ip: str) -> str:
-    """Генерирует .conf файл для клиента Amnezia VPN."""
-    awg_lines = (
+    """Текст конфига для хранения в БД. H-значения — диапазоны как у сервера."""
+    h1 = f"{settings.AWG_H1_MIN}-{settings.AWG_H1_MAX}"
+    h2 = f"{settings.AWG_H2_MIN}-{settings.AWG_H2_MAX}"
+    h3 = f"{settings.AWG_H3_MIN}-{settings.AWG_H3_MAX}"
+    h4 = f"{settings.AWG_H4_MIN}-{settings.AWG_H4_MAX}"
+
+    return (
+        "[Interface]\n"
+        f"Address = {peer_ip}/32\n"
+        f"DNS = {settings.WG_DNS}\n"
+        f"PrivateKey = {private_key}\n"
         f"Jc = {settings.AWG_JC}\n"
         f"Jmin = {settings.AWG_JMIN}\n"
         f"Jmax = {settings.AWG_JMAX}\n"
@@ -60,18 +71,11 @@ def build_client_config(private_key: str, peer_ip: str) -> str:
         f"S2 = {settings.AWG_S2}\n"
         f"S3 = {settings.AWG_S3}\n"
         f"S4 = {settings.AWG_S4}\n"
-        f"H1 = {settings.AWG_H1}\n"
-        f"H2 = {settings.AWG_H2}\n"
-        f"H3 = {settings.AWG_H3}\n"
-        f"H4 = {settings.AWG_H4}\n"
-    )
-
-    return (
-        "[Interface]\n"
-        f"PrivateKey = {private_key}\n"
-        f"Address = {peer_ip}/32\n"
-        f"DNS = {settings.WG_DNS}\n"
-        f"{awg_lines}\n"
+        f"H1 = {h1}\n"
+        f"H2 = {h2}\n"
+        f"H3 = {h3}\n"
+        f"H4 = {h4}\n"
+        "\n"
         "[Peer]\n"
         f"PublicKey = {settings.WG_SERVER_PUBLIC_KEY}\n"
         f"Endpoint = {settings.WG_SERVER_PUBLIC_IP}:{settings.WG_SERVER_PORT}\n"
@@ -80,49 +84,101 @@ def build_client_config(private_key: str, peer_ip: str) -> str:
     )
 
 
-def _strip_awg_params(conf: str) -> str:
-    """Убирает AWG-специфичные параметры из текста конфига, оставляя чистый WireGuard."""
-    awg_keys = {"Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4"}
-    lines = [ln for ln in conf.splitlines() if ln.split("=")[0].strip() not in awg_keys]
-    return "\n".join(lines) + "\n"
+def build_client_uri(private_key: str, public_key: str, peer_ip: str) -> str:
+    """Генерирует vpn:// ключ формата Amnezia VPN (amnezia-awg2, qCompress+JSON)."""
+    h1 = f"{settings.AWG_H1_MIN}-{settings.AWG_H1_MAX}"
+    h2 = f"{settings.AWG_H2_MIN}-{settings.AWG_H2_MAX}"
+    h3 = f"{settings.AWG_H3_MIN}-{settings.AWG_H3_MAX}"
+    h4 = f"{settings.AWG_H4_MIN}-{settings.AWG_H4_MAX}"
 
+    # Встроенный WG-конфиг внутри last_config — DNS как плейсхолдеры, как в оригинале Amnezia
+    embedded_wg_config = (
+        "[Interface]\n"
+        f"Address = {peer_ip}/32\n"
+        "DNS = $PRIMARY_DNS, $SECONDARY_DNS\n"
+        f"PrivateKey = {private_key}\n"
+        f"Jc = {settings.AWG_JC}\n"
+        f"Jmin = {settings.AWG_JMIN}\n"
+        f"Jmax = {settings.AWG_JMAX}\n"
+        f"S1 = {settings.AWG_S1}\n"
+        f"S2 = {settings.AWG_S2}\n"
+        f"S3 = {settings.AWG_S3}\n"
+        f"S4 = {settings.AWG_S4}\n"
+        f"H1 = {h1}\n"
+        f"H2 = {h2}\n"
+        f"H3 = {h3}\n"
+        f"H4 = {h4}\n"
+        f"I1 = {settings.AWG_I1}\n"
+        "I2 = \n"
+        "I3 = \n"
+        "I4 = \n"
+        "I5 = \n"
+        "\n"
+        "[Peer]\n"
+        f"PublicKey = {settings.WG_SERVER_PUBLIC_KEY}\n"
+        "AllowedIPs = 0.0.0.0/0, ::/0\n"
+        f"Endpoint = {settings.WG_SERVER_PUBLIC_IP}:{settings.WG_SERVER_PORT}\n"
+        "PersistentKeepalive = 25\n"
+    )
 
-def build_client_uri(conf_content: str) -> str:
-    """Генерирует vpn:// ключ для приложения Amnezia VPN.
+    subnet_address = str(ipaddress.ip_network(settings.WG_SUBNET, strict=False).network_address)
 
-    last_config содержит чистый WireGuard конфиг без AWG параметров —
-    AWG параметры передаются отдельными полями JSON, как ожидает Amnezia VPN.
-    """
+    last_config_obj = {
+        "H1": h1, "H2": h2, "H3": h3, "H4": h4,
+        "I1": settings.AWG_I1, "I2": "", "I3": "", "I4": "", "I5": "",
+        "Jc": str(settings.AWG_JC),
+        "Jmax": str(settings.AWG_JMAX),
+        "Jmin": str(settings.AWG_JMIN),
+        "S1": str(settings.AWG_S1),
+        "S2": str(settings.AWG_S2),
+        "S3": str(settings.AWG_S3),
+        "S4": str(settings.AWG_S4),
+        "allowed_ips": ["0.0.0.0/0", "::/0"],
+        "clientId": public_key,
+        "client_ip": peer_ip,
+        "client_priv_key": private_key,
+        "client_pub_key": public_key,
+        "config": embedded_wg_config,
+        "hostName": settings.WG_SERVER_PUBLIC_IP,
+        "mtu": "1376",
+        "persistent_keep_alive": "25",
+        "port": settings.WG_SERVER_PORT,
+        "psk_key": "",
+        "server_pub_key": settings.WG_SERVER_PUBLIC_KEY,
+    }
+
     data = {
         "containers": [
             {
-                "container": "amnezia-awg",
                 "awg": {
-                    "last_config": _strip_awg_params(conf_content),
-                    "transport_proto": "udp",
-                    "port": str(settings.WG_SERVER_PORT),
+                    "H1": h1, "H2": h2, "H3": h3, "H4": h4,
+                    "I1": settings.AWG_I1, "I2": "", "I3": "", "I4": "", "I5": "",
                     "Jc": str(settings.AWG_JC),
-                    "Jmin": str(settings.AWG_JMIN),
                     "Jmax": str(settings.AWG_JMAX),
+                    "Jmin": str(settings.AWG_JMIN),
                     "S1": str(settings.AWG_S1),
                     "S2": str(settings.AWG_S2),
                     "S3": str(settings.AWG_S3),
                     "S4": str(settings.AWG_S4),
-                    "H1": str(settings.AWG_H1),
-                    "H2": str(settings.AWG_H2),
-                    "H3": str(settings.AWG_H3),
-                    "H4": str(settings.AWG_H4),
-                }
+                    "last_config": json.dumps(last_config_obj, indent=4, ensure_ascii=False) + "\n",
+                    "port": str(settings.WG_SERVER_PORT),
+                    "protocol_version": "2",
+                    "subnet_address": subnet_address,
+                    "transport_proto": "udp",
+                },
+                "container": "amnezia-awg2",
             }
         ],
-        "defaultContainer": "amnezia-awg",
+        "defaultContainer": "amnezia-awg2",
         "description": "VPS Access",
         "dns1": settings.WG_DNS,
         "dns2": "8.8.8.8",
         "hostName": settings.WG_SERVER_PUBLIC_IP,
     }
+
     json_bytes = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    return "vpn://" + base64.b64encode(json_bytes).decode()
+    compressed = struct.pack(">I", len(json_bytes)) + zlib.compress(json_bytes)
+    return "vpn://" + base64.b64encode(compressed).decode()
 
 
 async def add_peer(public_key: str, peer_ip: str) -> None:
