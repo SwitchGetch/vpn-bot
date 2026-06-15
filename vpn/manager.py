@@ -3,8 +3,6 @@ import base64
 import ipaddress
 import json
 import logging
-import struct
-import zlib
 
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.serialization import (
@@ -82,18 +80,25 @@ def build_client_config(private_key: str, peer_ip: str) -> str:
     )
 
 
+def _strip_awg_params(conf: str) -> str:
+    """Убирает AWG-специфичные параметры из текста конфига, оставляя чистый WireGuard."""
+    awg_keys = {"Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4"}
+    lines = [ln for ln in conf.splitlines() if ln.split("=")[0].strip() not in awg_keys]
+    return "\n".join(lines) + "\n"
+
+
 def build_client_uri(conf_content: str) -> str:
     """Генерирует vpn:// ключ для приложения Amnezia VPN.
 
-    AWG параметры обфускации передаются и в last_config, и отдельными полями —
-    Amnezia VPN читает именно отдельные поля при установке соединения.
+    last_config содержит чистый WireGuard конфиг без AWG параметров —
+    AWG параметры передаются отдельными полями JSON, как ожидает Amnezia VPN.
     """
     data = {
         "containers": [
             {
                 "container": "amnezia-awg",
                 "awg": {
-                    "last_config": conf_content,
+                    "last_config": _strip_awg_params(conf_content),
                     "transport_proto": "udp",
                     "port": str(settings.WG_SERVER_PORT),
                     "junkPacketCount": str(settings.AWG_JC),
@@ -115,9 +120,7 @@ def build_client_uri(conf_content: str) -> str:
         "hostName": settings.WG_SERVER_PUBLIC_IP,
     }
     json_bytes = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    # Qt's qCompress: 4-byte big-endian uncompressed length + zlib data
-    compressed = struct.pack(">I", len(json_bytes)) + zlib.compress(json_bytes)
-    return "vpn://" + base64.b64encode(compressed).decode()
+    return "vpn://" + base64.b64encode(json_bytes).decode()
 
 
 async def add_peer(public_key: str, peer_ip: str) -> None:
