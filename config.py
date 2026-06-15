@@ -6,7 +6,7 @@ class Settings(BaseSettings):
     BOT_TOKEN: str
     ADMIN_IDS: list[int] = []
 
-    DATABASE_URL: str = "sqlite+aiosqlite:///vpn_bot.db"
+    DATABASE_URL: str = "sqlite+aiosqlite:///vpn-bot.db"
 
     WG_CONTAINER: str = "amnezia-wg2"
     WG_INTERFACE: str = "wg0"
