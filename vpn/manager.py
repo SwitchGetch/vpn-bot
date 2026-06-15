@@ -106,6 +106,8 @@ def build_client_uri(conf_content: str) -> str:
                     "junkPacketMaxSize": str(settings.AWG_JMAX),
                     "initPacketJunkSize": str(settings.AWG_S1),
                     "responsePacketJunkSize": str(settings.AWG_S2),
+                    "cookieReplyPacketJunkSize": str(settings.AWG_S3),
+                    "transportPacketJunkSize": str(settings.AWG_S4),
                     "initPacketMagicHeader": str(settings.AWG_H1),
                     "responsePacketMagicHeader": str(settings.AWG_H2),
                     "underloadPacketMagicHeader": str(settings.AWG_H3),
