@@ -3,6 +3,8 @@ import base64
 import ipaddress
 import json
 import logging
+import struct
+import zlib
 
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.serialization import (
@@ -113,7 +115,9 @@ def build_client_uri(conf_content: str) -> str:
         "hostName": settings.WG_SERVER_PUBLIC_IP,
     }
     json_bytes = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    return "vpn://" + base64.b64encode(json_bytes).decode()
+    # Qt's qCompress: 4-byte big-endian uncompressed length + zlib data
+    compressed = struct.pack(">I", len(json_bytes)) + zlib.compress(json_bytes)
+    return "vpn://" + base64.b64encode(compressed).decode()
 
 
 async def add_peer(public_key: str, peer_ip: str) -> None:
