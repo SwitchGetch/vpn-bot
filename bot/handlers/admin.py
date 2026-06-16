@@ -25,6 +25,7 @@ from database.queries import (
     create_config,
     create_plan,
     deactivate_config,
+    delete_config,
     delete_plan,
     get_all_plans,
     get_all_settings,
@@ -35,6 +36,7 @@ from database.queries import (
     get_stats,
     get_used_ips,
     get_user_by_chat_id,
+    rename_config,
     set_setting,
     set_user_banned,
     update_plan,
@@ -72,6 +74,7 @@ class AdminStates(StatesGroup):
     giving_config_device = State()  # data: {target_chat_id}
     giving_config_days   = State()  # data: {target_chat_id, device_name}
     messaging_user       = State()  # data: {target_chat_id}
+    renaming_config      = State()  # data: {config_id, user_chat_id}
 
 
 def _is_admin(user_id: int) -> bool:
@@ -495,6 +498,72 @@ async def cb_send_config(callback: CallbackQuery, session: AsyncSession) -> None
         await callback.answer("✅ Ключ отправлен пользователю.", show_alert=True)
     except Exception as e:
         await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("adm:cfg:rename:"))
+async def cb_rename_config_start(callback: CallbackQuery, state: FSMContext) -> None:
+    parts = callback.data.split(":")
+    config_id, user_chat_id = int(parts[3]), int(parts[4])
+    await state.update_data(config_id=config_id, user_chat_id=user_chat_id)
+    await state.set_state(AdminStates.renaming_config)
+    await callback.message.answer("✏️ Введите новое название устройства:")
+    await callback.answer()
+
+
+@router.message(AdminStates.renaming_config)
+async def cb_rename_config_finish(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    data = await state.get_data()
+    config_id = data["config_id"]
+    user_chat_id = data["user_chat_id"]
+    new_name = message.text.strip()[:32]
+    await state.clear()
+
+    cfg = await rename_config(session, config_id, new_name)
+    status = "✅ Активен" if cfg.is_active else "❌ Деактивирован"
+    await message.answer(
+        f"✅ Название изменено на <b>{new_name}</b>.\n\n"
+        f"🔑 <b>{cfg.device_name}</b>\n\n"
+        f"Статус: {status}\n"
+        f"Дней в тарифе: {cfg.plan_days}\n"
+        f"IP: <code>{cfg.peer_ip}</code>\n"
+        f"Истекает: {cfg.expires_at.strftime('%d.%m.%Y %H:%M UTC')}",
+        parse_mode="HTML",
+        reply_markup=admin_config_detail_kb(config_id, cfg.is_active, user_chat_id),
+    )
+
+
+@router.callback_query(F.data.startswith("adm:cfg:delete:"))
+async def cb_delete_config(callback: CallbackQuery, session: AsyncSession) -> None:
+    parts = callback.data.split(":")
+    config_id, user_chat_id = int(parts[3]), int(parts[4])
+    cfg = await get_config_by_id(session, config_id)
+    if not cfg:
+        await callback.answer("Конфиг не найден.", show_alert=True)
+        return
+    try:
+        if cfg.is_active:
+            await remove_peer(cfg.peer_public_key)
+        device_name = cfg.device_name
+        await delete_config(session, config_id)
+        try:
+            await callback.bot.send_message(
+                user_chat_id,
+                f"🗑️ Ваш ключ <b>{device_name}</b> был удалён администратором.",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+        await callback.answer("✅ Конфиг удалён.", show_alert=True)
+        user = await get_user_by_chat_id(session, user_chat_id)
+        if user:
+            await callback.message.edit_text(
+                f"🔑 Ключи пользователя <b>{user.full_name or user.chat_id}</b>:",
+                parse_mode="HTML",
+                reply_markup=admin_user_configs_kb(user.configs, user_chat_id),
+            )
+    except Exception as e:
+        logger.error("Error deleting config %d: %s", config_id, e)
+        await callback.answer("❌ Ошибка при удалении.", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("adm:cfg:revoke:"))

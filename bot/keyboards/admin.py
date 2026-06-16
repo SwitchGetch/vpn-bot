@@ -129,6 +129,8 @@ def admin_config_detail_kb(config_id: int, is_active: bool, user_chat_id: int) -
     if is_active:
         b.button(text="❌ Отозвать ключ", callback_data=f"adm:cfg:revoke:{config_id}:{user_chat_id}")
     b.button(text="📤 Переслать ключ пользователю", callback_data=f"adm:cfg:send:{config_id}:{user_chat_id}")
+    b.button(text="✏️ Переименовать", callback_data=f"adm:cfg:rename:{config_id}:{user_chat_id}")
+    b.button(text="🗑️ Удалить конфиг", callback_data=f"adm:cfg:delete:{config_id}:{user_chat_id}")
     b.button(text="◀️ Назад", callback_data=f"adm:user:configs:{user_chat_id}")
     b.adjust(1)
     return b.as_markup()

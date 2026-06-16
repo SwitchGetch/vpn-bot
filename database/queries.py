@@ -106,6 +106,27 @@ async def deactivate_config(session: AsyncSession, config_id: int) -> None:
     await session.commit()
 
 
+async def rename_config(session: AsyncSession, config_id: int, new_name: str) -> Config:
+    await session.execute(
+        update(Config).where(Config.id == config_id).values(device_name=new_name)
+    )
+    await session.commit()
+    result = await session.execute(select(Config).where(Config.id == config_id))
+    return result.scalar_one()
+
+
+async def delete_config(session: AsyncSession, config_id: int) -> None:
+    """Полностью удаляет конфиг из БД. Платежи сохраняются (config_id → NULL)."""
+    await session.execute(
+        update(Payment).where(Payment.config_id == config_id).values(config_id=None)
+    )
+    result = await session.execute(select(Config).where(Config.id == config_id))
+    cfg = result.scalar_one_or_none()
+    if cfg:
+        await session.delete(cfg)
+    await session.commit()
+
+
 async def get_expired_configs(session: AsyncSession) -> list[Config]:
     result = await session.execute(
         select(Config).where(Config.is_active == True, Config.expires_at < datetime.utcnow())
