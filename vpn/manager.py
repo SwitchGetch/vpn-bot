@@ -242,9 +242,30 @@ async def remove_peer(public_key: str) -> None:
 
 
 async def _persist_config() -> None:
-    """Сохраняет текущее состояние интерфейса в файл конфига внутри контейнера."""
-    await _run([
+    """Сохраняет текущее состояние интерфейса в файл конфига внутри контейнера.
+
+    awg showconf не включает Address и PostUp, поэтому мы вставляем Address
+    из текущего ip addr, чтобы после перезапуска контейнера маршрут 10.8.x/24
+    на awg-интерфейс восстановился корректно.
+    """
+    iface = settings.WG_INTERFACE
+    conf_path = settings.WG_CONFIG_PATH
+
+    # Получаем текущий IPv4-адрес интерфейса (например 10.8.1.1/24)
+    addr_out = await _run([
         "docker", "exec", settings.WG_CONTAINER,
         "sh", "-c",
-        f"awg showconf {settings.WG_INTERFACE} > {settings.WG_CONFIG_PATH}",
+        f"ip -4 addr show {iface} | awk '/inet /{{print $2}}'",
     ])
+
+    if addr_out:
+        # Вставляем Address сразу после [Interface]
+        script = (
+            f"awg showconf {iface} | "
+            f"awk '/^\\[Interface\\]$/{{print; print \"Address = {addr_out}\"; next}} {{print}}' "
+            f"> {conf_path}"
+        )
+    else:
+        script = f"awg showconf {iface} > {conf_path}"
+
+    await _run(["docker", "exec", settings.WG_CONTAINER, "sh", "-c", script])
