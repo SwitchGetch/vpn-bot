@@ -22,7 +22,7 @@ from database.queries import (
 from payments.crypto import create_invoice as crypto_create_invoice
 from payments.stars import extend_config_invoice as stars_extend, new_config_invoice as stars_new
 from payments.yookassa import extend_config_invoice as yookassa_extend, new_config_invoice as yookassa_new
-from vpn.manager import add_peer, allocate_ip, build_client_config, build_client_uri, generate_keypair
+from vpn.manager import add_peer, allocate_ip, build_client_config, build_client_uri, generate_keypair, generate_psk
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -290,9 +290,10 @@ async def payment_success(message: Message, state: FSMContext, session: AsyncSes
 
             used_ips = await get_used_ips(session)
             priv_key, pub_key = generate_keypair()
+            psk = generate_psk()
             peer_ip = allocate_ip(used_ips)
-            config_text = build_client_config(priv_key, peer_ip)
-            await add_peer(pub_key, peer_ip)
+            config_text = build_client_config(priv_key, peer_ip, psk)
+            await add_peer(pub_key, peer_ip, psk)
             config = await create_config(
                 session, user.id, device_name,
                 pub_key, priv_key, peer_ip, config_text, plan_days,
@@ -305,7 +306,7 @@ async def payment_success(message: Message, state: FSMContext, session: AsyncSes
                 plan_days=plan_days,
                 charge_id=payment.telegram_payment_charge_id,
             )
-            uri = build_client_uri(priv_key, pub_key, peer_ip)
+            uri = build_client_uri(priv_key, pub_key, peer_ip, psk)
             await message.answer(
                 f"✅ <b>Ключ готов!</b>\n\n"
                 f"Устройство: <b>{device_name}</b>\n"

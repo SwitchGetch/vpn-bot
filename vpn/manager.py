@@ -3,6 +3,8 @@ import base64
 import ipaddress
 import json
 import logging
+import os
+import shlex
 import struct
 import zlib
 
@@ -41,6 +43,21 @@ def generate_keypair() -> tuple[str, str]:
     return base64.b64encode(priv_bytes).decode(), base64.b64encode(pub_bytes).decode()
 
 
+def generate_psk() -> str:
+    """Generates a WireGuard preshared key — 32 random bytes, base64 encoded."""
+    return base64.b64encode(os.urandom(32)).decode()
+
+
+def extract_psk(config_text: str) -> str:
+    """Extracts PresharedKey value from a WG config text block."""
+    for line in config_text.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("presharedkey"):
+            _, _, v = stripped.partition("=")
+            return v.strip()
+    return ""
+
+
 def allocate_ip(used_ips: set[str]) -> str:
     """Выбирает следующий свободный IP из подсети."""
     network = ipaddress.ip_network(settings.WG_SUBNET, strict=False)
@@ -52,12 +69,14 @@ def allocate_ip(used_ips: set[str]) -> str:
     raise RuntimeError("Нет свободных IP в подсети. Расширьте WG_SUBNET.")
 
 
-def build_client_config(private_key: str, peer_ip: str) -> str:
+def build_client_config(private_key: str, peer_ip: str, psk: str = "") -> str:
     """Текст конфига для хранения в БД. H-значения — диапазоны как у сервера."""
     h1 = f"{settings.AWG_H1_MIN}-{settings.AWG_H1_MAX}"
     h2 = f"{settings.AWG_H2_MIN}-{settings.AWG_H2_MAX}"
     h3 = f"{settings.AWG_H3_MIN}-{settings.AWG_H3_MAX}"
     h4 = f"{settings.AWG_H4_MIN}-{settings.AWG_H4_MAX}"
+
+    psk_line = f"PresharedKey = {psk}\n" if psk else ""
 
     return (
         "[Interface]\n"
@@ -78,18 +97,21 @@ def build_client_config(private_key: str, peer_ip: str) -> str:
         "\n"
         "[Peer]\n"
         f"PublicKey = {settings.WG_SERVER_PUBLIC_KEY}\n"
+        f"{psk_line}"
         f"Endpoint = {settings.WG_SERVER_PUBLIC_IP}:{settings.WG_SERVER_PORT}\n"
         "AllowedIPs = 0.0.0.0/0, ::/0\n"
         "PersistentKeepalive = 25\n"
     )
 
 
-def build_client_uri(private_key: str, public_key: str, peer_ip: str) -> str:
+def build_client_uri(private_key: str, public_key: str, peer_ip: str, psk: str = "") -> str:
     """Генерирует vpn:// ключ формата Amnezia VPN (amnezia-awg2, qCompress+JSON)."""
     h1 = f"{settings.AWG_H1_MIN}-{settings.AWG_H1_MAX}"
     h2 = f"{settings.AWG_H2_MIN}-{settings.AWG_H2_MAX}"
     h3 = f"{settings.AWG_H3_MIN}-{settings.AWG_H3_MAX}"
     h4 = f"{settings.AWG_H4_MIN}-{settings.AWG_H4_MAX}"
+
+    psk_line = f"PresharedKey = {psk}\n" if psk else ""
 
     # Встроенный WG-конфиг внутри last_config — DNS как плейсхолдеры, как в оригинале Amnezia
     embedded_wg_config = (
@@ -116,6 +138,7 @@ def build_client_uri(private_key: str, public_key: str, peer_ip: str) -> str:
         "\n"
         "[Peer]\n"
         f"PublicKey = {settings.WG_SERVER_PUBLIC_KEY}\n"
+        f"{psk_line}"
         "AllowedIPs = 0.0.0.0/0, ::/0\n"
         f"Endpoint = {settings.WG_SERVER_PUBLIC_IP}:{settings.WG_SERVER_PORT}\n"
         "PersistentKeepalive = 25\n"
@@ -143,7 +166,7 @@ def build_client_uri(private_key: str, public_key: str, peer_ip: str) -> str:
         "mtu": "1376",
         "persistent_keep_alive": "25",
         "port": settings.WG_SERVER_PORT,
-        "psk_key": "",
+        "psk_key": psk,
         "server_pub_key": settings.WG_SERVER_PUBLIC_KEY,
     }
 
@@ -182,17 +205,29 @@ def build_client_uri(private_key: str, public_key: str, peer_ip: str) -> str:
     return "vpn://" + base64.urlsafe_b64encode(compressed).rstrip(b"=").decode()
 
 
-async def add_peer(public_key: str, peer_ip: str) -> None:
+async def add_peer(public_key: str, peer_ip: str, psk: str = "") -> None:
     """Добавляет пира в работающий интерфейс и сохраняет в конфиг."""
-    await _run([
-        "docker", "exec", settings.WG_CONTAINER,
-        "awg", "set", settings.WG_INTERFACE,
-        "peer", public_key,
-        "allowed-ips", f"{peer_ip}/32",
-        "persistent-keepalive", "25",
-    ])
+    if psk:
+        cmd = (
+            f"T=$(mktemp) && "
+            f"printf '%s\\n' {shlex.quote(psk)} > \"$T\" && "
+            f"awg set {shlex.quote(settings.WG_INTERFACE)} peer {shlex.quote(public_key)} "
+            f"preshared-key \"$T\" "
+            f"allowed-ips {shlex.quote(peer_ip + '/32')} "
+            f"persistent-keepalive 25 && "
+            f"rm \"$T\""
+        )
+        await _run(["docker", "exec", settings.WG_CONTAINER, "sh", "-c", cmd])
+    else:
+        await _run([
+            "docker", "exec", settings.WG_CONTAINER,
+            "awg", "set", settings.WG_INTERFACE,
+            "peer", public_key,
+            "allowed-ips", f"{peer_ip}/32",
+            "persistent-keepalive", "25",
+        ])
     await _persist_config()
-    logger.info("Peer added: %s -> %s", public_key[:8], peer_ip)
+    logger.info("Peer added: %s -> %s (psk=%s)", public_key[:8], peer_ip, bool(psk))
 
 
 async def remove_peer(public_key: str) -> None:

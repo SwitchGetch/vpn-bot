@@ -18,7 +18,7 @@ from database.queries import (
     get_user_by_chat_id,
 )
 from payments.crypto import get_paid_invoices
-from vpn.manager import add_peer, allocate_ip, build_client_config, build_client_uri, generate_keypair, remove_peer
+from vpn.manager import add_peer, allocate_ip, build_client_config, build_client_uri, generate_keypair, generate_psk, remove_peer
 
 logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler(timezone="UTC")
@@ -102,9 +102,10 @@ async def check_crypto_payments(bot: Bot) -> None:
                 if inv.action == "new":
                     used_ips = await get_used_ips(session)
                     priv_key, pub_key = generate_keypair()
+                    psk = generate_psk()
                     peer_ip = allocate_ip(used_ips)
-                    config_text = build_client_config(priv_key, peer_ip)
-                    await add_peer(pub_key, peer_ip)
+                    config_text = build_client_config(priv_key, peer_ip, psk)
+                    await add_peer(pub_key, peer_ip, psk)
 
                     device_name = inv.device_name or "Устройство"
                     config = await create_config(
@@ -121,7 +122,7 @@ async def check_crypto_payments(bot: Bot) -> None:
                         plan_days=inv.plan_days,
                         charge_id=str(inv.cryptopay_invoice_id),
                     )
-                    uri = build_client_uri(priv_key, pub_key, peer_ip)
+                    uri = build_client_uri(priv_key, pub_key, peer_ip, psk)
                     await bot.send_message(
                         inv.user_chat_id,
                         f"✅ <b>Оплата получена! Ключ готов.</b>\n\n"
