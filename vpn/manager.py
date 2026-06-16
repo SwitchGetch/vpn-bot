@@ -164,6 +164,7 @@ def build_client_uri(private_key: str, public_key: str, peer_ip: str) -> str:
                     "port": str(settings.WG_SERVER_PORT),
                     "protocol_version": "2",
                     "subnet_address": subnet_address,
+                    "subnet_cidr": str(ipaddress.ip_network(settings.WG_SUBNET, strict=False).prefixlen),
                     "transport_proto": "udp",
                 },
                 "container": "amnezia-awg2",
@@ -178,7 +179,7 @@ def build_client_uri(private_key: str, public_key: str, peer_ip: str) -> str:
 
     json_bytes = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     compressed = struct.pack(">I", len(json_bytes)) + zlib.compress(json_bytes)
-    return "vpn://" + base64.b64encode(compressed).decode()
+    return "vpn://" + base64.urlsafe_b64encode(compressed).rstrip(b"=").decode()
 
 
 async def add_peer(public_key: str, peer_ip: str) -> None:
