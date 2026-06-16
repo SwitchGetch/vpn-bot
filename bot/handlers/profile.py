@@ -1,11 +1,17 @@
 from aiogram import F, Router
-from aiogram.types import CallbackQuery
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.keyboards.inline import config_detail_kb, main_menu_kb
-from database.queries import get_config_by_id, get_or_create_user, get_user_configs
+from bot.keyboards.inline import back_to_main_kb, config_detail_kb, main_menu_kb
+from database.queries import get_config_by_id, get_or_create_user, get_user_configs, rename_config
 from vpn.manager import build_client_uri, extract_psk
+
+
+class ProfileStates(StatesGroup):
+    renaming_config = State()  # data: {config_id}
 
 router = Router()
 
@@ -87,3 +93,40 @@ async def download_config(callback: CallbackQuery, session: AsyncSession) -> Non
         parse_mode="HTML",
     )
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rename:"))
+async def rename_config_start(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    config_id = int(callback.data.split(":")[1])
+    cfg = await get_config_by_id(session, config_id)
+    if not cfg:
+        await callback.answer("Ключ не найден.", show_alert=True)
+        return
+    await state.update_data(config_id=config_id)
+    await state.set_state(ProfileStates.renaming_config)
+    await callback.message.answer(
+        f"✏️ Текущее название: <b>{cfg.device_name}</b>\n\nВведите новое название:",
+        parse_mode="HTML",
+        reply_markup=back_to_main_kb(),
+    )
+    await callback.answer()
+
+
+@router.message(ProfileStates.renaming_config)
+async def rename_config_finish(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    data = await state.get_data()
+    config_id = data["config_id"]
+    new_name = message.text.strip()[:32]
+    await state.clear()
+
+    cfg = await rename_config(session, config_id, new_name)
+    status = "✅ Активен" if cfg.is_active else "❌ Деактивирован"
+    expires = cfg.expires_at.strftime("%d.%m.%Y %H:%M UTC")
+    await message.answer(
+        f"✅ Переименовано в <b>{new_name}</b>.\n\n"
+        f"🔑 <b>{cfg.device_name}</b>\n"
+        f"Статус: {status}\n"
+        f"Истекает: <b>{expires}</b>",
+        parse_mode="HTML",
+        reply_markup=config_detail_kb(config_id, cfg.is_active),
+    )

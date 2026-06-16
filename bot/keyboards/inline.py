@@ -86,8 +86,9 @@ def config_detail_kb(config_id: int, is_active: bool) -> InlineKeyboardMarkup:
     b.button(text="📋 Получить ключ", callback_data=f"download:{config_id}")
     if is_active:
         b.button(text="🔄 Продлить", callback_data=f"extend:{config_id}")
+    b.button(text="✏️ Переименовать", callback_data=f"rename:{config_id}")
     b.button(text="◀️ Мои ключи", callback_data="profile")
-    b.adjust(2, 1) if is_active else b.adjust(1)
+    b.adjust(1)
     return b.as_markup()
 
 
