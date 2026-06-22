@@ -241,6 +241,40 @@ async def remove_peer(public_key: str) -> None:
     logger.info("Peer removed: %s", public_key[:8])
 
 
+async def sync_peers(session) -> None:
+    """При старте бота синхронизирует активные конфиги из БД с AWG-сервером.
+
+    Если контейнер был перезапущен и пиры сбросились — пересоздаёт их.
+    """
+    from database.queries import get_active_configs
+
+    try:
+        output = await _run([
+            "docker", "exec", settings.WG_CONTAINER,
+            "awg", "show", settings.WG_INTERFACE, "peers",
+        ])
+        server_keys = set(output.splitlines()) if output.strip() else set()
+    except Exception as e:
+        logger.error("sync_peers: не удалось получить пиров с сервера: %s", e)
+        return
+
+    active = await get_active_configs(session)
+    added = 0
+    for cfg in active:
+        if cfg.peer_public_key not in server_keys:
+            try:
+                psk = cfg.peer_psk or extract_psk(cfg.config_text)
+                await add_peer(cfg.peer_public_key, cfg.peer_ip, psk)
+                added += 1
+            except Exception as e:
+                logger.error("sync_peers: не удалось добавить пира %s: %s", cfg.peer_public_key[:8], e)
+
+    logger.info(
+        "sync_peers: %d активных конфигов, %d пиров пересоздано",
+        len(active), added,
+    )
+
+
 async def _persist_config() -> None:
     """Сохраняет текущее состояние интерфейса в файл конфига внутри контейнера.
 

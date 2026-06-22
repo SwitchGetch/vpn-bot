@@ -5,9 +5,11 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from database import async_session
 from database.queries import (
+    activate_config,
     create_config,
     create_payment,
     deactivate_config,
+    delete_config,
     delete_crypto_pending,
     extend_config,
     get_all_crypto_pending,
@@ -105,13 +107,19 @@ async def check_crypto_payments(bot: Bot) -> None:
                     psk = generate_psk()
                     peer_ip = allocate_ip(used_ips)
                     config_text = build_client_config(priv_key, peer_ip, psk)
-                    await add_peer(pub_key, peer_ip, psk)
 
                     device_name = inv.device_name or "Устройство"
                     config = await create_config(
                         session, user.id, device_name,
                         pub_key, priv_key, peer_ip, config_text, inv.plan_days,
+                        psk=psk, is_active=False,
                     )
+                    try:
+                        await add_peer(pub_key, peer_ip, psk)
+                    except Exception:
+                        await delete_config(session, config.id)
+                        raise
+                    await activate_config(session, config.id)
                     paid_currency = paid_item.get("paid_asset") or inv.asset
                     paid_amount = paid_item.get("paid_amount") or paid_item["amount"]
                     await create_payment(

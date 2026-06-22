@@ -21,6 +21,7 @@ from bot.keyboards.admin import (
 )
 from config import settings
 from database.queries import (
+    activate_config,
     count_users,
     create_config,
     create_plan,
@@ -485,7 +486,7 @@ async def cb_send_config(callback: CallbackQuery, session: AsyncSession) -> None
         await callback.answer("Ключ не найден.", show_alert=True)
         return
     try:
-        psk = extract_psk(cfg.config_text)
+        psk = cfg.peer_psk or extract_psk(cfg.config_text)
         uri = build_client_uri(cfg.peer_private_key, cfg.peer_public_key, cfg.peer_ip, psk)
         await callback.bot.send_message(
             user_chat_id,
@@ -695,12 +696,18 @@ async def cb_give_config_days(message: Message, state: FSMContext, session: Asyn
         psk = generate_psk()
         peer_ip = allocate_ip(used_ips)
         config_text = build_client_config(priv_key, peer_ip, psk)
-        await add_peer(pub_key, peer_ip, psk)
 
         config = await create_config(
             session, user.id, device_name,
             pub_key, priv_key, peer_ip, config_text, plan_days,
+            psk=psk, is_active=False,
         )
+        try:
+            await add_peer(pub_key, peer_ip, psk)
+        except Exception:
+            await delete_config(session, config.id)
+            raise
+        await activate_config(session, config.id)
 
         uri = build_client_uri(priv_key, pub_key, peer_ip, psk)
         await message.bot.send_message(

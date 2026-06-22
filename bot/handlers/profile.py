@@ -83,7 +83,7 @@ async def download_config(callback: CallbackQuery, session: AsyncSession) -> Non
         await callback.answer("Ключ не найден.", show_alert=True)
         return
 
-    psk = extract_psk(cfg.config_text)
+    psk = cfg.peer_psk or extract_psk(cfg.config_text)
     uri = build_client_uri(cfg.peer_private_key, cfg.peer_public_key, cfg.peer_ip, psk)
     await callback.message.answer(
         f"📋 <b>Ключ для {cfg.device_name}</b>\n"

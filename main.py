@@ -13,6 +13,7 @@ from bot.handlers import admin, buy, profile, start, support
 from config import settings
 from database import async_session, init_db
 from scheduler.tasks import setup_scheduler
+from vpn.manager import sync_peers
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,6 +37,9 @@ class DatabaseMiddleware(BaseMiddleware):
 
 async def main() -> None:
     await init_db()
+
+    async with async_session() as session:
+        await sync_peers(session)
 
     bot = Bot(
         token=settings.BOT_TOKEN,

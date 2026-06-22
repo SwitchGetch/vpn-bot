@@ -9,9 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.keyboards.inline import back_to_main_kb, extend_plans_kb, payment_method_kb, plans_kb
 from database.queries import (
+    activate_config,
     create_config,
     create_crypto_pending,
     create_payment,
+    delete_config,
     extend_config,
     get_active_plans,
     get_or_create_user,
@@ -293,11 +295,17 @@ async def payment_success(message: Message, state: FSMContext, session: AsyncSes
             psk = generate_psk()
             peer_ip = allocate_ip(used_ips)
             config_text = build_client_config(priv_key, peer_ip, psk)
-            await add_peer(pub_key, peer_ip, psk)
             config = await create_config(
                 session, user.id, device_name,
                 pub_key, priv_key, peer_ip, config_text, plan_days,
+                psk=psk, is_active=False,
             )
+            try:
+                await add_peer(pub_key, peer_ip, psk)
+            except Exception:
+                await delete_config(session, config.id)
+                raise
+            await activate_config(session, config.id)
             await create_payment(
                 session, user.id, config.id,
                 amount=str(payment.total_amount),

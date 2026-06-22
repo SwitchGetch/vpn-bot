@@ -30,6 +30,7 @@ class Config(Base):
     device_name = Column(String, nullable=False)
     peer_public_key = Column(String, nullable=False)
     peer_private_key = Column(String, nullable=False)
+    peer_psk = Column(String, nullable=False, default="")
     peer_ip = Column(String, nullable=False)
     config_text = Column(String, nullable=False)
     plan_days = Column(Integer, nullable=False)

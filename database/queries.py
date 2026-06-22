@@ -73,21 +73,35 @@ async def create_config(
     peer_ip: str,
     config_text: str,
     plan_days: int,
+    psk: str = "",
+    is_active: bool = True,
 ) -> Config:
     config = Config(
         user_id=user_id,
         device_name=device_name,
         peer_public_key=public_key,
         peer_private_key=private_key,
+        peer_psk=psk,
         peer_ip=peer_ip,
         config_text=config_text,
         plan_days=plan_days,
         expires_at=datetime.utcnow() + timedelta(days=plan_days),
+        is_active=is_active,
     )
     session.add(config)
     await session.commit()
     await session.refresh(config)
     return config
+
+
+async def activate_config(session: AsyncSession, config_id: int) -> None:
+    await session.execute(update(Config).where(Config.id == config_id).values(is_active=True))
+    await session.commit()
+
+
+async def get_active_configs(session: AsyncSession) -> list[Config]:
+    result = await session.execute(select(Config).where(Config.is_active == True))
+    return list(result.scalars().all())
 
 
 async def extend_config(session: AsyncSession, config_id: int, days: int) -> Config:
