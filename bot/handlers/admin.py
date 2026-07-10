@@ -14,6 +14,7 @@ from bot.keyboards.admin import (
     admin_payments_kb,
     admin_plan_detail_kb,
     admin_plans_kb,
+    admin_sub_delete_confirm_kb,
     admin_sub_detail_kb,
     admin_user_detail_kb,
     admin_users_kb,
@@ -513,6 +514,24 @@ async def cb_sub_send_url(callback: CallbackQuery, session: AsyncSession) -> Non
         await callback.answer("✅ URL отправлен пользователю.", show_alert=True)
     except Exception as e:
         await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("adm:sub:delconfirm:"))
+async def cb_sub_delete_confirm(callback: CallbackQuery, session: AsyncSession) -> None:
+    parts = callback.data.split(":")
+    sub_id, chat_id = int(parts[3]), int(parts[4])
+    sub = await get_subscription_by_id(session, sub_id)
+    if not sub:
+        await callback.answer("Подписка не найдена.", show_alert=True)
+        return
+    await callback.message.edit_text(
+        f"⚠️ <b>Удалить подписку #{sub.id}?</b>\n\n"
+        f"Пользователь потеряет доступ к VPN немедленно.\n"
+        f"Действие необратимо.",
+        parse_mode="HTML",
+        reply_markup=admin_sub_delete_confirm_kb(sub_id, chat_id),
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("adm:sub:delete:"))

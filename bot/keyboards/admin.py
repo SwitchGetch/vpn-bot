@@ -119,8 +119,16 @@ def admin_sub_detail_kb(sub: Subscription, chat_id: int) -> InlineKeyboardMarkup
         b.button(text="✅ Активировать",   callback_data=f"adm:sub:activate:{sub.id}:{chat_id}")
     b.button(text="📱 HWID устройства",            callback_data=f"adm:sub:hwid:{sub.id}:{chat_id}")
     b.button(text="📤 Отправить URL пользователю", callback_data=f"adm:sub:send:{sub.id}:{chat_id}")
-    b.button(text="🗑️ Удалить подписку",           callback_data=f"adm:sub:delete:{sub.id}:{chat_id}")
+    b.button(text="🗑️ Удалить подписку",           callback_data=f"adm:sub:delconfirm:{sub.id}:{chat_id}")
     b.button(text="◀️ Назад",                       callback_data=f"adm:user:{chat_id}")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def admin_sub_delete_confirm_kb(sub_id: int, chat_id: int) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="✅ Да, удалить", callback_data=f"adm:sub:delete:{sub_id}:{chat_id}")
+    b.button(text="◀️ Отмена",      callback_data=f"adm:user:sub:{chat_id}")
     b.adjust(1)
     return b.as_markup()
 
