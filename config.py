@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     XRAY_FINGERPRINT: str = "chrome"
 
     # HTTP сервер для subscription URL
+    SUB_BIND: str = "0.0.0.0"  # 127.0.0.1 — принимать только локальные запросы (от Caddy)
     SUB_PORT: int = 8080
     SUB_SERVICE_NAME: str = "VPN"  # отображается в happ как название подписки
     # Внешний базовый URL подписки (например "https://sub.example.com:8443").

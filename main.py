@@ -114,9 +114,9 @@ async def run_sub_server() -> web.AppRunner:
     app.router.add_get("/sub/{token}", handle_subscription)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", settings.SUB_PORT)
+    site = web.TCPSite(runner, settings.SUB_BIND, settings.SUB_PORT)
     await site.start()
-    logger.info("Subscription server started on port %d", settings.SUB_PORT)
+    logger.info("Subscription server started on %s:%d", settings.SUB_BIND, settings.SUB_PORT)
     return runner
 
 
