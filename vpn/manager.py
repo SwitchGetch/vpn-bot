@@ -1,20 +1,8 @@
 import asyncio
-import base64
-import ipaddress
 import json
 import logging
-import os
-import shlex
-import struct
-import zlib
-
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
-from cryptography.hazmat.primitives.serialization import (
-    Encoding,
-    NoEncryption,
-    PrivateFormat,
-    PublicFormat,
-)
+import urllib.parse
+import uuid
 
 from config import settings
 
@@ -35,271 +23,110 @@ async def _run(cmd: list[str]) -> str:
     return stdout.decode().strip()
 
 
-def generate_keypair() -> tuple[str, str]:
-    """Returns (private_key_b64, public_key_b64) — Curve25519, совместимо с WireGuard."""
-    private_key = X25519PrivateKey.generate()
-    priv_bytes = private_key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
-    pub_bytes = private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-    return base64.b64encode(priv_bytes).decode(), base64.b64encode(pub_bytes).decode()
+def generate_uuid() -> str:
+    return str(uuid.uuid4())
 
 
-def generate_psk() -> str:
-    """Generates a WireGuard preshared key — 32 random bytes, base64 encoded."""
-    return base64.b64encode(os.urandom(32)).decode()
-
-
-def extract_psk(config_text: str) -> str:
-    """Extracts PresharedKey value from a WG config text block."""
-    for line in config_text.splitlines():
-        stripped = line.strip()
-        if stripped.lower().startswith("presharedkey"):
-            _, _, v = stripped.partition("=")
-            return v.strip()
-    return ""
-
-
-def allocate_ip(used_ips: set[str]) -> str:
-    """Выбирает следующий свободный IP из подсети."""
-    network = ipaddress.ip_network(settings.WG_SUBNET, strict=False)
-    hosts = network.hosts()
-    next(hosts)  # .1 — это сервер, пропускаем
-    for ip in hosts:
-        if str(ip) not in used_ips:
-            return str(ip)
-    raise RuntimeError("Нет свободных IP в подсети. Расширьте WG_SUBNET.")
-
-
-def build_client_config(private_key: str, peer_ip: str, psk: str = "") -> str:
-    """Текст конфига для хранения в БД. H-значения — диапазоны как у сервера."""
-    h1 = f"{settings.AWG_H1_MIN}-{settings.AWG_H1_MAX}"
-    h2 = f"{settings.AWG_H2_MIN}-{settings.AWG_H2_MAX}"
-    h3 = f"{settings.AWG_H3_MIN}-{settings.AWG_H3_MAX}"
-    h4 = f"{settings.AWG_H4_MIN}-{settings.AWG_H4_MAX}"
-
-    psk_line = f"PresharedKey = {psk}\n" if psk else ""
-
-    return (
-        "[Interface]\n"
-        f"Address = {peer_ip}/32\n"
-        f"DNS = {settings.WG_DNS}\n"
-        f"PrivateKey = {private_key}\n"
-        f"Jc = {settings.AWG_JC}\n"
-        f"Jmin = {settings.AWG_JMIN}\n"
-        f"Jmax = {settings.AWG_JMAX}\n"
-        f"S1 = {settings.AWG_S1}\n"
-        f"S2 = {settings.AWG_S2}\n"
-        f"S3 = {settings.AWG_S3}\n"
-        f"S4 = {settings.AWG_S4}\n"
-        f"H1 = {h1}\n"
-        f"H2 = {h2}\n"
-        f"H3 = {h3}\n"
-        f"H4 = {h4}\n"
-        "\n"
-        "[Peer]\n"
-        f"PublicKey = {settings.WG_SERVER_PUBLIC_KEY}\n"
-        f"{psk_line}"
-        f"Endpoint = {settings.WG_SERVER_PUBLIC_IP}:{settings.WG_SERVER_PORT}\n"
-        "AllowedIPs = 0.0.0.0/0, ::/0\n"
-        "PersistentKeepalive = 25\n"
+def build_vless_uri(xray_uuid: str, name: str = "VPN") -> str:
+    params = (
+        f"type=tcp"
+        f"&security=reality"
+        f"&pbk={settings.XRAY_PUBLIC_KEY}"
+        f"&fp={settings.XRAY_FINGERPRINT}"
+        f"&sni={settings.XRAY_SERVER_NAME}"
+        f"&sid={settings.XRAY_SHORT_ID}"
     )
+    encoded_name = urllib.parse.quote(name)
+    return f"vless://{xray_uuid}@{settings.SERVER_IP}:{settings.XRAY_PORT}?{params}#{encoded_name}"
 
 
-def build_client_uri(private_key: str, public_key: str, peer_ip: str, psk: str = "") -> str:
-    """Генерирует vpn:// ключ формата Amnezia VPN (amnezia-awg2, qCompress+JSON)."""
-    h1 = f"{settings.AWG_H1_MIN}-{settings.AWG_H1_MAX}"
-    h2 = f"{settings.AWG_H2_MIN}-{settings.AWG_H2_MAX}"
-    h3 = f"{settings.AWG_H3_MIN}-{settings.AWG_H3_MAX}"
-    h4 = f"{settings.AWG_H4_MIN}-{settings.AWG_H4_MAX}"
-
-    psk_line = f"PresharedKey = {psk}\n" if psk else ""
-
-    # Встроенный WG-конфиг внутри last_config — DNS как плейсхолдеры, как в оригинале Amnezia
-    embedded_wg_config = (
-        "[Interface]\n"
-        f"Address = {peer_ip}/32\n"
-        "DNS = $PRIMARY_DNS, $SECONDARY_DNS\n"
-        f"PrivateKey = {private_key}\n"
-        f"Jc = {settings.AWG_JC}\n"
-        f"Jmin = {settings.AWG_JMIN}\n"
-        f"Jmax = {settings.AWG_JMAX}\n"
-        f"S1 = {settings.AWG_S1}\n"
-        f"S2 = {settings.AWG_S2}\n"
-        f"S3 = {settings.AWG_S3}\n"
-        f"S4 = {settings.AWG_S4}\n"
-        f"H1 = {h1}\n"
-        f"H2 = {h2}\n"
-        f"H3 = {h3}\n"
-        f"H4 = {h4}\n"
-        f"I1 = {settings.AWG_I1}\n"
-        "I2 = \n"
-        "I3 = \n"
-        "I4 = \n"
-        "I5 = \n"
-        "\n"
-        "[Peer]\n"
-        f"PublicKey = {settings.WG_SERVER_PUBLIC_KEY}\n"
-        f"{psk_line}"
-        "AllowedIPs = 0.0.0.0/0, ::/0\n"
-        f"Endpoint = {settings.WG_SERVER_PUBLIC_IP}:{settings.WG_SERVER_PORT}\n"
-        "PersistentKeepalive = 25\n"
-    )
-
-    subnet_address = str(ipaddress.ip_network(settings.WG_SUBNET, strict=False).network_address)
-
-    last_config_obj = {
-        "H1": h1, "H2": h2, "H3": h3, "H4": h4,
-        "I1": settings.AWG_I1, "I2": "", "I3": "", "I4": "", "I5": "",
-        "Jc": str(settings.AWG_JC),
-        "Jmax": str(settings.AWG_JMAX),
-        "Jmin": str(settings.AWG_JMIN),
-        "S1": str(settings.AWG_S1),
-        "S2": str(settings.AWG_S2),
-        "S3": str(settings.AWG_S3),
-        "S4": str(settings.AWG_S4),
-        "allowed_ips": ["0.0.0.0/0", "::/0"],
-        "clientId": public_key,
-        "client_ip": peer_ip,
-        "client_priv_key": private_key,
-        "client_pub_key": public_key,
-        "config": embedded_wg_config,
-        "hostName": settings.WG_SERVER_PUBLIC_IP,
-        "mtu": "1376",
-        "persistent_keep_alive": "25",
-        "port": settings.WG_SERVER_PORT,
-        "psk_key": psk,
-        "server_pub_key": settings.WG_SERVER_PUBLIC_KEY,
-    }
-
-    data = {
-        "containers": [
-            {
-                "awg": {
-                    "H1": h1, "H2": h2, "H3": h3, "H4": h4,
-                    "I1": settings.AWG_I1, "I2": "", "I3": "", "I4": "", "I5": "",
-                    "Jc": str(settings.AWG_JC),
-                    "Jmax": str(settings.AWG_JMAX),
-                    "Jmin": str(settings.AWG_JMIN),
-                    "S1": str(settings.AWG_S1),
-                    "S2": str(settings.AWG_S2),
-                    "S3": str(settings.AWG_S3),
-                    "S4": str(settings.AWG_S4),
-                    "last_config": json.dumps(last_config_obj, indent=4, ensure_ascii=False) + "\n",
-                    "port": str(settings.WG_SERVER_PORT),
-                    "protocol_version": "2",
-                    "subnet_address": subnet_address,
-                    "subnet_cidr": str(ipaddress.ip_network(settings.WG_SUBNET, strict=False).prefixlen),
-                    "transport_proto": "udp",
-                },
-                "container": "amnezia-awg2",
-            }
-        ],
-        "defaultContainer": "amnezia-awg2",
-        "description": "VPS Access",
-        "dns1": settings.WG_DNS,
-        "dns2": "8.8.8.8",
-        "hostName": settings.WG_SERVER_PUBLIC_IP,
-    }
-
-    json_bytes = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    compressed = struct.pack(">I", len(json_bytes)) + zlib.compress(json_bytes)
-    return "vpn://" + base64.urlsafe_b64encode(compressed).rstrip(b"=").decode()
+def calc_price(n: int, base_price: int) -> int:
+    """Цена за n устройств. При n→∞ скидка стремится к 50%."""
+    return round(n * base_price * (1 / (n + 1) + 0.5))
 
 
-async def add_peer(public_key: str, peer_ip: str, psk: str = "") -> None:
-    """Добавляет пира в работающий интерфейс и сохраняет в конфиг."""
-    if psk:
-        cmd = (
-            f"T=$(mktemp) && "
-            f"printf '%s\\n' {shlex.quote(psk)} > \"$T\" && "
-            f"awg set {shlex.quote(settings.WG_INTERFACE)} peer {shlex.quote(public_key)} "
-            f"preshared-key \"$T\" "
-            f"allowed-ips {shlex.quote(peer_ip + '/32')} "
-            f"persistent-keepalive 25 && "
-            f"rm \"$T\""
-        )
-        await _run(["docker", "exec", settings.WG_CONTAINER, "sh", "-c", cmd])
-    else:
-        await _run([
-            "docker", "exec", settings.WG_CONTAINER,
-            "awg", "set", settings.WG_INTERFACE,
-            "peer", public_key,
-            "allowed-ips", f"{peer_ip}/32",
-            "persistent-keepalive", "25",
-        ])
-    await _persist_config()
-    logger.info("Peer added: %s -> %s (psk=%s)", public_key[:8], peer_ip, bool(psk))
+def calc_price_usd(n: int, base_usd: float) -> str:
+    """Та же формула для USD, результат — строка вида '4.50'."""
+    return f"{n * base_usd * (1 / (n + 1) + 0.5):.2f}"
 
 
-async def remove_peer(public_key: str) -> None:
-    """Удаляет пира из интерфейса и сохраняет конфиг."""
-    await _run([
-        "docker", "exec", settings.WG_CONTAINER,
-        "awg", "set", settings.WG_INTERFACE,
-        "peer", public_key, "remove",
-    ])
-    await _persist_config()
-    logger.info("Peer removed: %s", public_key[:8])
+def calc_upgrade_cost(
+    old_n: int, new_n: int, base_price: int, plan_days: int, remaining_days: int
+) -> int:
+    """Стоимость апгрейда: (новая цена - старая цена) * остаток / период."""
+    old_price = calc_price(old_n, base_price)
+    new_price = calc_price(new_n, base_price)
+    return max(1, round((new_price - old_price) * remaining_days / plan_days))
 
 
-async def sync_peers(session) -> None:
-    """При старте бота синхронизирует активные конфиги из БД с AWG-сервером.
+def _load_config() -> dict:
+    with open(settings.XRAY_CONFIG_PATH) as f:
+        return json.load(f)
 
-    Если контейнер был перезапущен и пиры сбросились — пересоздаёт их.
-    """
-    from database.queries import get_active_configs
 
+def _save_config(config: dict) -> None:
+    with open(settings.XRAY_CONFIG_PATH, "w") as f:
+        json.dump(config, f, indent=4, ensure_ascii=False)
+
+
+async def _reload_xray() -> None:
+    await _run(["systemctl", "restart", "xray"])
+
+
+async def add_xray_users(uuids: list[str]) -> None:
+    """Добавляет несколько пользователей одним перезапуском XRay."""
+    if not uuids:
+        return
+    config = _load_config()
+    clients = config["inbounds"][0]["settings"]["clients"]
+    existing = {c["id"] for c in clients}
+    added = 0
+    for u in uuids:
+        if u not in existing:
+            clients.append({"id": u, "email": u})
+            added += 1
+    if added:
+        _save_config(config)
+        await _reload_xray()
+    logger.info("XRay users added: %d", added)
+
+
+async def remove_xray_users(uuids: list[str]) -> None:
+    """Удаляет несколько пользователей одним перезапуском XRay."""
+    if not uuids:
+        return
+    uuid_set = set(uuids)
+    config = _load_config()
+    clients = config["inbounds"][0]["settings"]["clients"]
+    new_clients = [c for c in clients if c["id"] not in uuid_set]
+    if len(new_clients) != len(clients):
+        config["inbounds"][0]["settings"]["clients"] = new_clients
+        _save_config(config)
+        await _reload_xray()
+    logger.info("XRay users removed: %d", len(uuids))
+
+
+async def sync_xray_users(active_uuids: list[str]) -> None:
+    """При старте синхронизирует XRay конфиг с активными UUID из БД."""
     try:
-        output = await _run([
-            "docker", "exec", settings.WG_CONTAINER,
-            "awg", "show", settings.WG_INTERFACE, "peers",
-        ])
-        server_keys = set(output.splitlines()) if output.strip() else set()
+        config = _load_config()
     except Exception as e:
-        logger.error("sync_peers: не удалось получить пиров с сервера: %s", e)
+        logger.error("sync_xray_users: не удалось прочитать конфиг: %s", e)
         return
 
-    active = await get_active_configs(session)
-    added = 0
-    for cfg in active:
-        if cfg.peer_public_key not in server_keys:
-            try:
-                psk = cfg.peer_psk or extract_psk(cfg.config_text)
-                await add_peer(cfg.peer_public_key, cfg.peer_ip, psk)
-                added += 1
-            except Exception as e:
-                logger.error("sync_peers: не удалось добавить пира %s: %s", cfg.peer_public_key[:8], e)
+    active_set = set(active_uuids)
+    current = {c["id"] for c in config["inbounds"][0]["settings"]["clients"]}
 
+    if active_set == current:
+        logger.info("sync_xray_users: конфиг актуален (%d пользователей)", len(active_set))
+        return
+
+    config["inbounds"][0]["settings"]["clients"] = [
+        {"id": u, "email": u} for u in active_uuids
+    ]
+    _save_config(config)
+    await _reload_xray()
     logger.info(
-        "sync_peers: %d активных конфигов, %d пиров пересоздано",
-        len(active), added,
+        "sync_xray_users: обновлено %d → %d пользователей",
+        len(current), len(active_set),
     )
-
-
-async def _persist_config() -> None:
-    """Сохраняет текущее состояние интерфейса в файл конфига внутри контейнера.
-
-    awg showconf не включает Address и PostUp, поэтому мы вставляем Address
-    из текущего ip addr, чтобы после перезапуска контейнера маршрут 10.8.x/24
-    на awg-интерфейс восстановился корректно.
-    """
-    iface = settings.WG_INTERFACE
-    conf_path = settings.WG_CONFIG_PATH
-
-    # Получаем текущий IPv4-адрес интерфейса (например 10.8.1.1/24)
-    addr_out = await _run([
-        "docker", "exec", settings.WG_CONTAINER,
-        "sh", "-c",
-        f"ip -4 addr show {iface} | awk '/inet /{{print $2}}'",
-    ])
-
-    if addr_out:
-        # Вставляем Address сразу после [Interface]
-        script = (
-            f"awg showconf {iface} | "
-            f"awk '/^\\[Interface\\]$/{{print; print \"Address = {addr_out}\"; next}} {{print}}' "
-            f"> {conf_path}"
-        )
-    else:
-        script = f"awg showconf {iface} > {conf_path}"
-
-    await _run(["docker", "exec", settings.WG_CONTAINER, "sh", "-c", script])

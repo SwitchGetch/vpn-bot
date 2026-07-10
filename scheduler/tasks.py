@@ -3,24 +3,29 @@ import logging
 from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from config import build_sub_url
 from database import async_session
 from database.queries import (
-    activate_config,
-    create_config,
+    add_device,
     create_payment,
-    deactivate_config,
-    delete_config,
+    create_subscription,
+    deactivate_subscription,
     delete_crypto_pending,
-    extend_config,
+    delete_stale_crypto_pending,
+    extend_subscription,
     get_all_crypto_pending,
-    get_expired_configs,
-    get_expiring_soon,
+    get_expired_subscriptions,
+    get_expiring_soon_subscriptions,
     get_setting,
-    get_used_ips,
+    get_subscription_by_id,
     get_user_by_chat_id,
+    get_user_subscription,
+    mark_reminder_sent,
+    remove_all_devices,
+    update_subscription_devices,
 )
 from payments.crypto import get_paid_invoices
-from vpn.manager import add_peer, allocate_ip, build_client_config, build_client_uri, generate_keypair, generate_psk, remove_peer
+from vpn.manager import add_xray_users, generate_uuid, remove_xray_users
 
 logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler(timezone="UTC")
@@ -35,44 +40,49 @@ def setup_scheduler(bot: Bot) -> None:
 
 
 async def check_expired(bot: Bot) -> None:
-    """Отзывает конфиги с истёкшим сроком действия."""
     async with async_session() as session:
-        expired = await get_expired_configs(session)
-        for config in expired:
+        expired = await get_expired_subscriptions(session)
+        for sub in expired:
             try:
-                await remove_peer(config.peer_public_key)
-                await deactivate_config(session, config.id)
+                uuids = [d.xray_uuid for d in sub.devices]
+                if uuids:
+                    await remove_xray_users(uuids)
+                await deactivate_subscription(session, sub.id)
                 await bot.send_message(
-                    config.user.chat_id,
-                    f"❌ Ключ <b>{config.device_name}</b> истёк и деактивирован.\n\n"
-                    "Нажмите /start чтобы купить новый или продлить.",
-                    parse_mode="HTML",
+                    sub.user.chat_id,
+                    "❌ Ваша подписка истекла и деактивирована.\n\n"
+                    "Нажмите /start чтобы купить новую или продлить.",
                 )
-                logger.info("Deactivated config %d for user %d", config.id, config.user_id)
+                logger.info("Deactivated subscription %d for user %d", sub.id, sub.user_id)
             except Exception as e:
-                logger.error("Failed to deactivate config %d: %s", config.id, e)
+                logger.error("Failed to deactivate subscription %d: %s", sub.id, e)
 
 
 async def send_reminders(bot: Bot) -> None:
-    """Отправляет напоминания за 3 дня до истечения конфига."""
     async with async_session() as session:
-        expiring = await get_expiring_soon(session, days=3)
-        for config in expiring:
+        expiring = await get_expiring_soon_subscriptions(session, days=3)
+        for sub in expiring:
             try:
-                expires = config.expires_at.strftime("%d.%m.%Y")
+                expires = sub.expires_at.strftime("%d.%m.%Y")
                 await bot.send_message(
-                    config.user.chat_id,
-                    f"⚠️ Ключ <b>{config.device_name}</b> истекает <b>{expires}</b>.\n\n"
+                    sub.user.chat_id,
+                    f"⚠️ Ваша подписка истекает <b>{expires}</b>.\n\n"
                     "Продлите доступ через /start",
                     parse_mode="HTML",
                 )
             except Exception:
                 pass
+            # Помечаем в любом случае, чтобы не долбить пользователя, заблокировавшего бота
+            await mark_reminder_sent(session, sub.id)
 
 
 async def check_crypto_payments(bot: Bot) -> None:
-    """Проверяет оплаченные CryptoPay-инвойсы и активирует конфиги."""
     async with async_session() as session:
+        # Инвойс CryptoPay живёт 1 час — записи старше 2 часов уже не оплатить
+        removed = await delete_stale_crypto_pending(session, max_age_hours=2)
+        if removed:
+            logger.info("Removed %d stale crypto invoices", removed)
+
         pending = await get_all_crypto_pending(session)
         if not pending:
             return
@@ -95,6 +105,9 @@ async def check_crypto_payments(bot: Bot) -> None:
                 continue
 
             paid_item = paid_map[inv.cryptopay_invoice_id]
+            paid_currency = paid_item.get("paid_asset") or inv.asset
+            paid_amount = paid_item.get("paid_amount") or paid_item["amount"]
+
             try:
                 user = await get_user_by_chat_id(session, inv.user_chat_id)
                 if not user:
@@ -102,51 +115,59 @@ async def check_crypto_payments(bot: Bot) -> None:
                     continue
 
                 if inv.action == "new":
-                    used_ips = await get_used_ips(session)
-                    priv_key, pub_key = generate_keypair()
-                    psk = generate_psk()
-                    peer_ip = allocate_ip(used_ips)
-                    config_text = build_client_config(priv_key, peer_ip, psk)
+                    existing = await get_user_subscription(session, user.id)
+                    if existing:
+                        old_uuids = await remove_all_devices(session, existing.id)
+                        if old_uuids:
+                            await remove_xray_users(old_uuids)
+                        await session.delete(existing)
+                        await session.commit()
 
-                    device_name = inv.device_name or "Устройство"
-                    config = await create_config(
-                        session, user.id, device_name,
-                        pub_key, priv_key, peer_ip, config_text, inv.plan_days,
-                        psk=psk, is_active=False,
+                    sub = await create_subscription(
+                        session,
+                        user_id=user.id,
+                        plan_days=inv.plan_days,
+                        max_devices=inv.device_count,
+                        base_device_price=inv.base_device_price,
+                        is_active=True,
                     )
-                    try:
-                        await add_peer(pub_key, peer_ip, psk)
-                    except Exception:
-                        await delete_config(session, config.id)
-                        raise
-                    await activate_config(session, config.id)
-                    paid_currency = paid_item.get("paid_asset") or inv.asset
-                    paid_amount = paid_item.get("paid_amount") or paid_item["amount"]
+                    uuids = []
+                    for i in range(inv.device_count):
+                        uid = generate_uuid()
+                        await add_device(session, sub.id, uid, device_name=f"Устройство {i + 1}")
+                        uuids.append(uid)
+                    await add_xray_users(uuids)
+
                     await create_payment(
-                        session, user.id, config.id,
+                        session, user.id, sub.id,
                         amount=str(paid_amount),
                         currency=paid_currency,
                         payment_method="crypto",
                         plan_days=inv.plan_days,
                         charge_id=str(inv.cryptopay_invoice_id),
                     )
-                    uri = build_client_uri(priv_key, pub_key, peer_ip, psk)
+                    sub_url = build_sub_url(sub.sub_token)
                     await bot.send_message(
                         inv.user_chat_id,
-                        f"✅ <b>Оплата получена! Ключ готов.</b>\n\n"
-                        f"Устройство: <b>{device_name}</b>\n"
-                        f"Действителен до: <b>{config.expires_at.strftime('%d.%m.%Y')}</b>\n\n"
-                        f"Скопируйте ключ и вставьте в Amnezia VPN (+ → Вставить ключ):\n\n"
-                        f"<code>{uri}</code>",
+                        f"✅ <b>Оплата получена! Подписка активирована.</b>\n\n"
+                        f"Устройств: <b>{inv.device_count}</b>\n"
+                        f"Действует до: <b>{sub.expires_at.strftime('%d.%m.%Y')}</b>\n\n"
+                        f"📋 Subscription URL для happ:\n<code>{sub_url}</code>\n\n"
+                        f"<i>В happ: + → Добавить подписку → вставьте URL</i>",
                         parse_mode="HTML",
                     )
 
                 elif inv.action == "extend":
-                    config = await extend_config(session, inv.config_id, inv.plan_days)
-                    paid_currency = paid_item.get("paid_asset") or inv.asset
-                    paid_amount = paid_item.get("paid_amount") or paid_item["amount"]
+                    sub_id = inv.subscription_id
+                    if not sub_id:
+                        await delete_crypto_pending(session, inv.cryptopay_invoice_id)
+                        continue
+                    sub = await extend_subscription(session, sub_id, inv.plan_days)
+                    uuids = [d.xray_uuid for d in sub.devices]
+                    if uuids:
+                        await add_xray_users(uuids)
                     await create_payment(
-                        session, user.id, config.id,
+                        session, user.id, sub.id,
                         amount=str(paid_amount),
                         currency=paid_currency,
                         payment_method="crypto",
@@ -155,9 +176,40 @@ async def check_crypto_payments(bot: Bot) -> None:
                     )
                     await bot.send_message(
                         inv.user_chat_id,
-                        f"✅ <b>Оплата получена! Ключ продлён.</b>\n\n"
-                        f"Устройство: <b>{config.device_name}</b>\n"
-                        f"Новая дата: <b>{config.expires_at.strftime('%d.%m.%Y')}</b>",
+                        f"✅ <b>Оплата получена! Подписка продлена.</b>\n\n"
+                        f"Действует до: <b>{sub.expires_at.strftime('%d.%m.%Y')}</b>",
+                        parse_mode="HTML",
+                    )
+
+                elif inv.action == "add_device":
+                    sub_id = inv.subscription_id
+                    if not sub_id:
+                        await delete_crypto_pending(session, inv.cryptopay_invoice_id)
+                        continue
+                    sub = await get_subscription_by_id(session, sub_id)
+                    if not sub:
+                        await delete_crypto_pending(session, inv.cryptopay_invoice_id)
+                        continue
+                    uuids = []
+                    current_count = len(sub.devices)
+                    for i in range(inv.device_count):
+                        uid = generate_uuid()
+                        await add_device(session, sub.id, uid, device_name=f"Устройство {current_count + i + 1}")
+                        uuids.append(uid)
+                    await add_xray_users(uuids)
+                    await update_subscription_devices(session, sub.id, sub.max_devices + inv.device_count)
+                    await create_payment(
+                        session, user.id, sub.id,
+                        amount=str(paid_amount),
+                        currency=paid_currency,
+                        payment_method="crypto",
+                        plan_days=inv.plan_days,
+                        charge_id=str(inv.cryptopay_invoice_id),
+                    )
+                    await bot.send_message(
+                        inv.user_chat_id,
+                        f"✅ <b>Оплата получена! Устройства добавлены.</b>\n\n"
+                        f"Добавлено устройств: <b>+{inv.device_count}</b>",
                         parse_mode="HTML",
                     )
 

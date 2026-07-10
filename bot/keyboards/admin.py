@@ -1,15 +1,15 @@
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from database.models import Plan
+from database.models import Plan, Subscription
 
 
 def admin_menu_kb() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="📊 Статистика",    callback_data="adm:stats")
-    b.button(text="💳 Оплата",        callback_data="adm:pay")
-    b.button(text="📋 Тарифы",        callback_data="adm:plans")
-    b.button(text="👥 Пользователи",  callback_data="adm:users:0")
+    b.button(text="📊 Статистика",   callback_data="adm:stats")
+    b.button(text="💳 Оплата",       callback_data="adm:pay")
+    b.button(text="📋 Тарифы",       callback_data="adm:plans")
+    b.button(text="👥 Пользователи", callback_data="adm:users:0")
     b.adjust(2)
     return b.as_markup()
 
@@ -50,7 +50,7 @@ def admin_plans_kb(plans: list[Plan]) -> InlineKeyboardMarkup:
     for plan in plans:
         status = "✅" if plan.is_active else "❌"
         b.button(
-            text=f"{status} {plan.label} — {plan.stars_price} ⭐",
+            text=f"{status} {plan.label} — {plan.stars_price} ⭐/устр.",
             callback_data=f"adm:plan:{plan.id}",
         )
     b.button(text="➕ Добавить тариф", callback_data="adm:plan:add")
@@ -62,15 +62,15 @@ def admin_plans_kb(plans: list[Plan]) -> InlineKeyboardMarkup:
 def admin_plan_detail_kb(plan: Plan) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     toggle = "❌ Деактивировать" if plan.is_active else "✅ Активировать"
-    b.button(text=toggle,                      callback_data=f"adm:plan:toggle:{plan.id}")
-    b.button(text="✏️ Название",              callback_data=f"adm:plan:field:{plan.id}:label")
-    b.button(text="✏️ Кол-во дней",           callback_data=f"adm:plan:field:{plan.id}:days")
-    b.button(text="✏️ Цена Stars",            callback_data=f"adm:plan:field:{plan.id}:stars_price")
-    b.button(text="✏️ Цена руб. (ЮKassa)",   callback_data=f"adm:plan:field:{plan.id}:rub_kopeks")
-    b.button(text="✏️ Цена USDT (Крипто)",   callback_data=f"adm:plan:field:{plan.id}:usdt_price")
-    b.button(text="↕️ Порядок сортировки",    callback_data=f"adm:plan:field:{plan.id}:sort_order")
-    b.button(text="🗑️ Удалить тариф",        callback_data=f"adm:plan:del:{plan.id}")
-    b.button(text="◀️ Назад",                 callback_data="adm:plans")
+    b.button(text=toggle,                       callback_data=f"adm:plan:toggle:{plan.id}")
+    b.button(text="✏️ Название",               callback_data=f"adm:plan:field:{plan.id}:label")
+    b.button(text="✏️ Кол-во дней",            callback_data=f"adm:plan:field:{plan.id}:days")
+    b.button(text="✏️ Цена Stars/устр.",       callback_data=f"adm:plan:field:{plan.id}:stars_price")
+    b.button(text="✏️ Цена руб. (ЮKassa)",    callback_data=f"adm:plan:field:{plan.id}:rub_kopeks")
+    b.button(text="✏️ Цена USDT (Крипто)",    callback_data=f"adm:plan:field:{plan.id}:usdt_price")
+    b.button(text="↕️ Порядок сортировки",     callback_data=f"adm:plan:field:{plan.id}:sort_order")
+    b.button(text="🗑️ Удалить тариф",         callback_data=f"adm:plan:del:{plan.id}")
+    b.button(text="◀️ Назад",                  callback_data="adm:plans")
     b.adjust(1)
     return b.as_markup()
 
@@ -81,9 +81,9 @@ def admin_users_kb(users: list, page: int, total: int, per_page: int = 20) -> In
     b = InlineKeyboardBuilder()
     for u in users:
         username = f"@{u.username}" if u.username else "—"
-        active = sum(1 for c in u.configs if c.is_active)
+        has_sub = "🔑" if u.subscription and u.subscription.is_active else "·"
         b.button(
-            text=f"{u.full_name or username} | {active} конф.",
+            text=f"{has_sub} {u.full_name or username}",
             callback_data=f"adm:user:{u.chat_id}",
         )
     nav = []
@@ -98,39 +98,44 @@ def admin_users_kb(users: list, page: int, total: int, per_page: int = 20) -> In
     return b.as_markup()
 
 
-def admin_user_detail_kb(chat_id: int, is_banned: bool) -> InlineKeyboardMarkup:
+def admin_user_detail_kb(chat_id: int, is_banned: bool, has_sub: bool) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     ban_text = "✅ Разблокировать" if is_banned else "🚫 Заблокировать"
-    b.button(text=ban_text,                    callback_data=f"adm:user:ban:{chat_id}")
-    b.button(text="🔑 Ключи",                  callback_data=f"adm:user:configs:{chat_id}")
-    b.button(text="➕ Выдать ключ",            callback_data=f"adm:user:give:{chat_id}")
-    b.button(text="✉️ Написать пользователю",  callback_data=f"adm:user:msg:{chat_id}")
-    b.button(text="◀️ Назад",                  callback_data="adm:users:0")
+    b.button(text=ban_text, callback_data=f"adm:user:ban:{chat_id}")
+    if has_sub:
+        b.button(text="🔑 Подписка", callback_data=f"adm:user:sub:{chat_id}")
+    b.button(text="🎁 Выдать подписку",         callback_data=f"adm:user:give:{chat_id}")
+    b.button(text="✉️ Написать пользователю",   callback_data=f"adm:user:msg:{chat_id}")
+    b.button(text="◀️ Назад",                   callback_data="adm:users:0")
     b.adjust(1)
     return b.as_markup()
 
 
-def admin_user_configs_kb(configs: list, chat_id: int) -> InlineKeyboardMarkup:
+def admin_sub_detail_kb(sub: Subscription, chat_id: int) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    for cfg in configs:
-        status = "✅" if cfg.is_active else "❌"
-        expires = cfg.expires_at.strftime("%d.%m.%Y")
+    if sub.is_active:
+        b.button(text="❌ Деактивировать", callback_data=f"adm:sub:deactivate:{sub.id}:{chat_id}")
+    else:
+        b.button(text="✅ Активировать",   callback_data=f"adm:sub:activate:{sub.id}:{chat_id}")
+    b.button(text="📱 HWID устройства",            callback_data=f"adm:sub:hwid:{sub.id}:{chat_id}")
+    b.button(text="📤 Отправить URL пользователю", callback_data=f"adm:sub:send:{sub.id}:{chat_id}")
+    b.button(text="🗑️ Удалить подписку",           callback_data=f"adm:sub:delete:{sub.id}:{chat_id}")
+    b.button(text="◀️ Назад",                       callback_data=f"adm:user:{chat_id}")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def admin_hwid_devices_kb(hwid_devices: list, sub_id: int, chat_id: int) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    for d in hwid_devices:
+        icon = "✅" if not d.is_blocked else "🚫"
+        label = (d.device_model or "Устройство")[:20]
+        if d.device_os:
+            label += f" ({d.device_os})"
         b.button(
-            text=f"{status} {cfg.device_name} до {expires}",
-            callback_data=f"adm:cfg:{cfg.id}:{chat_id}",
+            text=f"{icon} {label}",
+            callback_data=f"adm:hwid:toggle:{d.id}:{sub_id}:{chat_id}",
         )
-    b.button(text="◀️ Назад", callback_data=f"adm:user:{chat_id}")
-    b.adjust(1)
-    return b.as_markup()
-
-
-def admin_config_detail_kb(config_id: int, is_active: bool, user_chat_id: int) -> InlineKeyboardMarkup:
-    b = InlineKeyboardBuilder()
-    if is_active:
-        b.button(text="❌ Отозвать ключ", callback_data=f"adm:cfg:revoke:{config_id}:{user_chat_id}")
-    b.button(text="📤 Переслать ключ пользователю", callback_data=f"adm:cfg:send:{config_id}:{user_chat_id}")
-    b.button(text="✏️ Переименовать", callback_data=f"adm:cfg:rename:{config_id}:{user_chat_id}")
-    b.button(text="🗑️ Удалить конфиг", callback_data=f"adm:cfg:delete:{config_id}:{user_chat_id}")
-    b.button(text="◀️ Назад", callback_data=f"adm:user:configs:{user_chat_id}")
+    b.button(text="◀️ Назад", callback_data=f"adm:user:sub:{chat_id}")
     b.adjust(1)
     return b.as_markup()

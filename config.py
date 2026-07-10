@@ -8,32 +8,22 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str = "sqlite+aiosqlite:///vpn-bot.db"
 
-    WG_CONTAINER: str = "amnezia-awg2"
-    WG_INTERFACE: str = "awg0"
-    WG_CONFIG_PATH: str = "/opt/amnezia/awg/awg0.conf"
-    WG_SERVER_PUBLIC_IP: str
-    WG_SERVER_PORT: int = 51820
-    WG_SERVER_PUBLIC_KEY: str
-    WG_SUBNET: str = "10.8.1.0/24"
-    WG_DNS: str = "1.1.1.1"
+    SERVER_IP: str  # публичный IP сервера
 
-    AWG_I1: str = ""
+    # XRay / VLESS+Reality
+    XRAY_CONFIG_PATH: str = "/usr/local/etc/xray/config.json"
+    XRAY_PORT: int = 443
+    XRAY_PUBLIC_KEY: str = ""
+    XRAY_SHORT_ID: str = ""
+    XRAY_SERVER_NAME: str = "www.googletagmanager.com"
+    XRAY_FINGERPRINT: str = "chrome"
 
-    AWG_JC: int = 4
-    AWG_JMIN: int = 40
-    AWG_JMAX: int = 70
-    AWG_S1: int = 0
-    AWG_S2: int = 0
-    AWG_S3: int = 0
-    AWG_S4: int = 0
-    AWG_H1_MIN: int = 1
-    AWG_H1_MAX: int = 2147483647
-    AWG_H2_MIN: int = 1
-    AWG_H2_MAX: int = 2147483647
-    AWG_H3_MIN: int = 1
-    AWG_H3_MAX: int = 2147483647
-    AWG_H4_MIN: int = 1
-    AWG_H4_MAX: int = 2147483647
+    # HTTP сервер для subscription URL
+    SUB_PORT: int = 8080
+    SUB_SERVICE_NAME: str = "VPN"  # отображается в happ как название подписки
+    # Внешний базовый URL подписки (например "https://sub.example.com:8443").
+    # Если пусто — используется http://SERVER_IP:SUB_PORT
+    SUB_BASE_URL: str = ""
 
     @field_validator("ADMIN_IDS", mode="before")
     @classmethod
@@ -44,12 +34,18 @@ class Settings(BaseSettings):
             return [v]
         return v
 
-    model_config = {"env_file": ".env"}
+    # extra="ignore": лишние ключи в .env (например, оставшиеся от старых версий) не роняют запуск
+    model_config = {"env_file": ".env", "extra": "ignore"}
 
 
 settings = Settings()
 
-# Используется только для первоначального заполнения БД
+
+def build_sub_url(token: str) -> str:
+    base = settings.SUB_BASE_URL.rstrip("/") or f"http://{settings.SERVER_IP}:{settings.SUB_PORT}"
+    return f"{base}/sub/{token}"
+
+
 DEFAULT_PLANS = [
     {"days": 30,  "label": "30 дней",  "stars_price": 150},
     {"days": 90,  "label": "90 дней",  "stars_price": 350},

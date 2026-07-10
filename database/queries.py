@@ -1,9 +1,10 @@
+import secrets
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import BotSetting, Config, CryptoPendingInvoice, Payment, Plan, User
+from .models import BotSetting, CryptoPendingInvoice, Device, HwidDevice, Payment, Plan, Subscription, User
 
 
 # ── Users ───────────────────────────────────────────────────────
@@ -39,125 +40,233 @@ async def count_users(session: AsyncSession) -> int:
 
 
 async def set_user_banned(session: AsyncSession, chat_id: int, banned: bool) -> None:
-    await session.execute(
-        update(User).where(User.chat_id == chat_id).values(is_banned=banned)
-    )
+    await session.execute(update(User).where(User.chat_id == chat_id).values(is_banned=banned))
     await session.commit()
 
 
-# ── Configs ─────────────────────────────────────────────────────
+# ── Subscriptions ────────────────────────────────────────────────
 
-async def get_user_configs(session: AsyncSession, user_id: int) -> list[Config]:
-    result = await session.execute(
-        select(Config).where(Config.user_id == user_id).order_by(Config.created_at.desc())
-    )
-    return list(result.scalars().all())
-
-
-async def get_config_by_id(session: AsyncSession, config_id: int) -> Config | None:
-    result = await session.execute(select(Config).where(Config.id == config_id))
+async def get_user_subscription(session: AsyncSession, user_id: int) -> Subscription | None:
+    result = await session.execute(select(Subscription).where(Subscription.user_id == user_id))
     return result.scalar_one_or_none()
 
 
-async def get_used_ips(session: AsyncSession) -> set[str]:
-    result = await session.execute(select(Config.peer_ip))
-    return {row[0] for row in result.fetchall()}
+async def get_subscription_by_token(session: AsyncSession, token: str) -> Subscription | None:
+    result = await session.execute(select(Subscription).where(Subscription.sub_token == token))
+    return result.scalar_one_or_none()
 
 
-async def create_config(
+async def get_subscription_by_id(session: AsyncSession, sub_id: int) -> Subscription | None:
+    result = await session.execute(select(Subscription).where(Subscription.id == sub_id))
+    return result.scalar_one_or_none()
+
+
+async def create_subscription(
     session: AsyncSession,
     user_id: int,
-    device_name: str,
-    public_key: str,
-    private_key: str,
-    peer_ip: str,
-    config_text: str,
     plan_days: int,
-    psk: str = "",
+    max_devices: int,
+    base_device_price: int,
+    name: str = "Моя подписка",
     is_active: bool = True,
-) -> Config:
-    config = Config(
+) -> Subscription:
+    sub = Subscription(
         user_id=user_id,
-        device_name=device_name,
-        peer_public_key=public_key,
-        peer_private_key=private_key,
-        peer_psk=psk,
-        peer_ip=peer_ip,
-        config_text=config_text,
+        name=name,
         plan_days=plan_days,
+        max_devices=max_devices,
+        base_device_price=base_device_price,
+        sub_token=secrets.token_urlsafe(24),
         expires_at=datetime.utcnow() + timedelta(days=plan_days),
         is_active=is_active,
     )
-    session.add(config)
+    session.add(sub)
     await session.commit()
-    await session.refresh(config)
-    return config
+    await session.refresh(sub)
+    return sub
 
 
-async def activate_config(session: AsyncSession, config_id: int) -> None:
-    await session.execute(update(Config).where(Config.id == config_id).values(is_active=True))
-    await session.commit()
-
-
-async def get_active_configs(session: AsyncSession) -> list[Config]:
-    result = await session.execute(select(Config).where(Config.is_active == True))
-    return list(result.scalars().all())
-
-
-async def extend_config(session: AsyncSession, config_id: int, days: int) -> Config:
-    result = await session.execute(select(Config).where(Config.id == config_id))
-    config = result.scalar_one()
-    base = max(config.expires_at, datetime.utcnow())
-    config.expires_at = base + timedelta(days=days)
-    config.is_active = True
-    await session.commit()
-    await session.refresh(config)
-    return config
-
-
-async def deactivate_config(session: AsyncSession, config_id: int) -> None:
-    await session.execute(update(Config).where(Config.id == config_id).values(is_active=False))
+async def activate_subscription(session: AsyncSession, sub_id: int) -> None:
+    await session.execute(update(Subscription).where(Subscription.id == sub_id).values(is_active=True))
     await session.commit()
 
 
-async def rename_config(session: AsyncSession, config_id: int, new_name: str) -> Config:
+async def extend_subscription(session: AsyncSession, sub_id: int, days: int) -> Subscription:
+    result = await session.execute(select(Subscription).where(Subscription.id == sub_id))
+    sub = result.scalar_one()
+    base = max(sub.expires_at, datetime.utcnow())
+    sub.expires_at = base + timedelta(days=days)
+    sub.is_active = True
+    sub.reminder_sent = False
+    await session.commit()
+    await session.refresh(sub)
+    return sub
+
+
+async def deactivate_subscription(session: AsyncSession, sub_id: int) -> None:
+    await session.execute(update(Subscription).where(Subscription.id == sub_id).values(is_active=False))
+    await session.commit()
+
+
+async def update_subscription_devices(
+    session: AsyncSession, sub_id: int, max_devices: int
+) -> Subscription:
     await session.execute(
-        update(Config).where(Config.id == config_id).values(device_name=new_name)
+        update(Subscription).where(Subscription.id == sub_id).values(max_devices=max_devices)
     )
     await session.commit()
-    result = await session.execute(select(Config).where(Config.id == config_id))
+    result = await session.execute(select(Subscription).where(Subscription.id == sub_id))
     return result.scalar_one()
 
 
-async def delete_config(session: AsyncSession, config_id: int) -> None:
-    """Полностью удаляет конфиг из БД. Платежи сохраняются (config_id → NULL)."""
-    await session.execute(
-        update(Payment).where(Payment.config_id == config_id).values(config_id=None)
-    )
-    result = await session.execute(select(Config).where(Config.id == config_id))
-    cfg = result.scalar_one_or_none()
-    if cfg:
-        await session.delete(cfg)
-    await session.commit()
-
-
-async def get_expired_configs(session: AsyncSession) -> list[Config]:
+async def get_expired_subscriptions(session: AsyncSession) -> list[Subscription]:
     result = await session.execute(
-        select(Config).where(Config.is_active == True, Config.expires_at < datetime.utcnow())
-    )
-    return list(result.scalars().all())
-
-
-async def get_expiring_soon(session: AsyncSession, days: int = 3) -> list[Config]:
-    now = datetime.utcnow()
-    result = await session.execute(
-        select(Config).where(
-            Config.is_active == True,
-            Config.expires_at > now,
-            Config.expires_at < now + timedelta(days=days),
+        select(Subscription).where(
+            Subscription.is_active == True,
+            Subscription.expires_at < datetime.utcnow(),
         )
     )
     return list(result.scalars().all())
+
+
+async def get_expiring_soon_subscriptions(session: AsyncSession, days: int = 3) -> list[Subscription]:
+    now = datetime.utcnow()
+    result = await session.execute(
+        select(Subscription).where(
+            Subscription.is_active == True,
+            Subscription.expires_at > now,
+            Subscription.expires_at < now + timedelta(days=days),
+            Subscription.reminder_sent == False,
+        )
+    )
+    return list(result.scalars().all())
+
+
+async def mark_reminder_sent(session: AsyncSession, sub_id: int) -> None:
+    await session.execute(
+        update(Subscription).where(Subscription.id == sub_id).values(reminder_sent=True)
+    )
+    await session.commit()
+
+
+async def get_all_active_subscriptions(session: AsyncSession) -> list[Subscription]:
+    result = await session.execute(select(Subscription).where(Subscription.is_active == True))
+    return list(result.scalars().all())
+
+
+# ── Devices ─────────────────────────────────────────────────────
+
+async def add_device(
+    session: AsyncSession,
+    subscription_id: int,
+    xray_uuid: str,
+    device_name: str = "Устройство",
+) -> Device:
+    device = Device(
+        subscription_id=subscription_id,
+        xray_uuid=xray_uuid,
+        device_name=device_name,
+    )
+    session.add(device)
+    await session.commit()
+    await session.refresh(device)
+    return device
+
+
+async def remove_all_devices(session: AsyncSession, subscription_id: int) -> list[str]:
+    """Удаляет все устройства подписки, возвращает список xray_uuid."""
+    result = await session.execute(
+        select(Device).where(Device.subscription_id == subscription_id)
+    )
+    devices = result.scalars().all()
+    uuids = [d.xray_uuid for d in devices]
+    for device in devices:
+        await session.delete(device)
+    await session.commit()
+    return uuids
+
+
+# ── HWID Devices ────────────────────────────────────────────────
+
+async def get_hwid_device(
+    session: AsyncSession, subscription_id: int, hwid: str
+) -> HwidDevice | None:
+    result = await session.execute(
+        select(HwidDevice).where(
+            HwidDevice.subscription_id == subscription_id,
+            HwidDevice.hwid == hwid,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_hwid_devices_for_sub(
+    session: AsyncSession, subscription_id: int
+) -> list[HwidDevice]:
+    result = await session.execute(
+        select(HwidDevice)
+        .where(HwidDevice.subscription_id == subscription_id)
+        .order_by(HwidDevice.last_seen.desc())
+    )
+    return list(result.scalars().all())
+
+
+async def register_hwid_device(
+    session: AsyncSession,
+    subscription_id: int,
+    hwid: str,
+    device_model: str = "",
+    device_os: str = "",
+    os_version: str = "",
+    user_agent: str = "",
+) -> HwidDevice:
+    device = HwidDevice(
+        subscription_id=subscription_id,
+        hwid=hwid,
+        device_model=device_model or None,
+        device_os=device_os or None,
+        os_version=os_version or None,
+        user_agent=user_agent or None,
+    )
+    session.add(device)
+    await session.commit()
+    await session.refresh(device)
+    return device
+
+
+async def touch_hwid_device(session: AsyncSession, hwid_device_id: int) -> None:
+    await session.execute(
+        update(HwidDevice)
+        .where(HwidDevice.id == hwid_device_id)
+        .values(last_seen=datetime.utcnow())
+    )
+    await session.commit()
+
+
+async def block_hwid_device(session: AsyncSession, hwid_device_id: int, blocked: bool) -> None:
+    await session.execute(
+        update(HwidDevice).where(HwidDevice.id == hwid_device_id).values(is_blocked=blocked)
+    )
+    await session.commit()
+
+
+async def delete_hwid_device(session: AsyncSession, hwid_device_id: int) -> None:
+    result = await session.execute(select(HwidDevice).where(HwidDevice.id == hwid_device_id))
+    obj = result.scalar_one_or_none()
+    if obj:
+        await session.delete(obj)
+        await session.commit()
+
+
+async def clear_hwid_devices(session: AsyncSession, subscription_id: int) -> None:
+    """Удаляет все HWID устройства подписки (например, при перевыпуске)."""
+    await session.execute(delete(HwidDevice).where(HwidDevice.subscription_id == subscription_id))
+    await session.commit()
+
+
+async def get_hwid_device_by_id(session: AsyncSession, hwid_device_id: int) -> HwidDevice | None:
+    result = await session.execute(select(HwidDevice).where(HwidDevice.id == hwid_device_id))
+    return result.scalar_one_or_none()
 
 
 # ── Payments ────────────────────────────────────────────────────
@@ -165,7 +274,7 @@ async def get_expiring_soon(session: AsyncSession, days: int = 3) -> list[Config
 async def create_payment(
     session: AsyncSession,
     user_id: int,
-    config_id: int | None,
+    subscription_id: int | None,
     amount: str,
     currency: str,
     payment_method: str,
@@ -174,7 +283,7 @@ async def create_payment(
 ) -> Payment:
     payment = Payment(
         user_id=user_id,
-        config_id=config_id,
+        subscription_id=subscription_id,
         amount=amount,
         currency=currency,
         payment_method=payment_method,
@@ -239,17 +348,19 @@ async def create_crypto_pending(
     action: str,
     plan_days: int,
     asset: str = "USDT",
-    device_name: str | None = None,
-    config_id: int | None = None,
+    device_count: int = 1,
+    base_device_price: int = 0,
+    subscription_id: int | None = None,
 ) -> CryptoPendingInvoice:
     obj = CryptoPendingInvoice(
         cryptopay_invoice_id=cryptopay_invoice_id,
         user_chat_id=user_chat_id,
         action=action,
         plan_days=plan_days,
+        device_count=device_count,
+        base_device_price=base_device_price,
         asset=asset,
-        device_name=device_name,
-        config_id=config_id,
+        subscription_id=subscription_id,
     )
     session.add(obj)
     await session.commit()
@@ -259,6 +370,16 @@ async def create_crypto_pending(
 async def get_all_crypto_pending(session: AsyncSession) -> list[CryptoPendingInvoice]:
     result = await session.execute(select(CryptoPendingInvoice))
     return list(result.scalars().all())
+
+
+async def delete_stale_crypto_pending(session: AsyncSession, max_age_hours: int = 2) -> int:
+    """Удаляет неоплаченные инвойсы старше max_age_hours (сам инвойс CryptoPay живёт 1 час)."""
+    cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
+    result = await session.execute(
+        delete(CryptoPendingInvoice).where(CryptoPendingInvoice.created_at < cutoff)
+    )
+    await session.commit()
+    return result.rowcount or 0
 
 
 async def delete_crypto_pending(session: AsyncSession, invoice_id: int) -> None:
@@ -301,9 +422,9 @@ async def get_all_settings(session: AsyncSession) -> dict[str, str]:
 async def get_stats(session: AsyncSession) -> dict:
     users_res = await session.execute(select(func.count()).select_from(User))
     active_res = await session.execute(
-        select(func.count()).select_from(Config).where(Config.is_active == True)
+        select(func.count()).select_from(Subscription).where(Subscription.is_active == True)
     )
-    total_cfg_res = await session.execute(select(func.count()).select_from(Config))
+    devices_res = await session.execute(select(func.count()).select_from(Device))
 
     stars_amounts = await session.execute(
         select(Payment.amount).where(Payment.payment_method == "stars")
@@ -319,8 +440,8 @@ async def get_stats(session: AsyncSession) -> dict:
 
     return {
         "users": users_res.scalar() or 0,
-        "active_configs": active_res.scalar() or 0,
-        "total_configs": total_cfg_res.scalar() or 0,
+        "active_subscriptions": active_res.scalar() or 0,
+        "total_devices": devices_res.scalar() or 0,
         "total_stars": total_stars,
         "yookassa_count": yookassa_res.scalar() or 0,
         "crypto_count": crypto_res.scalar() or 0,

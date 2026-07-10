@@ -8,44 +8,48 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.keyboards.admin import (
-    admin_config_detail_kb,
+    admin_hwid_devices_kb,
     admin_menu_kb,
     admin_payment_detail_kb,
     admin_payments_kb,
     admin_plan_detail_kb,
     admin_plans_kb,
-    admin_user_configs_kb,
+    admin_sub_detail_kb,
     admin_user_detail_kb,
     admin_users_kb,
     back_admin_kb,
 )
-from config import settings
+from config import build_sub_url, settings
 from database.queries import (
-    activate_config,
+    activate_subscription,
+    add_device,
+    block_hwid_device,
     count_users,
-    create_config,
     create_plan,
-    deactivate_config,
-    delete_config,
+    create_subscription,
+    deactivate_subscription,
     delete_plan,
     get_all_plans,
     get_all_settings,
     get_all_users,
-    get_config_by_id,
+    get_hwid_device_by_id,
+    get_hwid_devices_for_sub,
     get_plan_by_id,
     get_setting,
     get_stats,
-    get_used_ips,
+    get_subscription_by_id,
     get_user_by_chat_id,
-    rename_config,
+    get_user_subscription,
+    remove_all_devices,
     set_setting,
     set_user_banned,
     update_plan,
 )
-from vpn.manager import add_peer, allocate_ip, build_client_config, build_client_uri, extract_psk, generate_keypair, generate_psk, remove_peer
+from vpn.manager import add_xray_users, generate_uuid, remove_xray_users
 
 logger = logging.getLogger(__name__)
 router = Router()
+
 
 def _is_positive_decimal(v: str) -> bool:
     try:
@@ -57,7 +61,7 @@ def _is_positive_decimal(v: str) -> bool:
 _PLAN_FIELDS = {
     "label":       ("название",                                               str, None),
     "days":        ("кол-во дней",                                            int, lambda v: v > 0),
-    "stars_price": ("цену в Telegram Stars",                                  int, lambda v: v > 0),
+    "stars_price": ("цену в Telegram Stars (за 1 устройство)",                int, lambda v: v > 0),
     "rub_kopeks":  ("цену в копейках для ЮKassa (напр. 19900 = 199₽)",       int, lambda v: v > 0),
     "usdt_price":  ("цену в USDT для Крипто (напр. 2.50)",                   str, _is_positive_decimal),
     "sort_order":  ("порядок сортировки",                                     int, None),
@@ -68,25 +72,17 @@ _PAY_NAMES = {"stars": "Stars", "yookassa": "ЮKassa", "crypto": "Крипто"}
 
 class AdminStates(StatesGroup):
     editing_token       = State()  # data: {method}
-    editing_plan_field  = State()  # data: {plan_id, field, label, cast}
+    editing_plan_field  = State()  # data: {plan_id, field, field_label, cast}
     adding_plan_days    = State()
     adding_plan_label   = State()
     adding_plan_stars   = State()
-    giving_config_device = State()  # data: {target_chat_id}
-    giving_config_days   = State()  # data: {target_chat_id, device_name}
-    messaging_user       = State()  # data: {target_chat_id}
-    renaming_config      = State()  # data: {config_id, user_chat_id}
+    giving_sub_days     = State()  # data: {target_chat_id}
+    giving_sub_devices  = State()  # data: {target_chat_id, plan_days}
+    messaging_user      = State()  # data: {target_chat_id}
 
-
-def _is_admin(user_id: int) -> bool:
-    return user_id in settings.ADMIN_IDS
-
-
-# ── Фильтр: только для админов ──────────────────────────────────
 
 async def _admin_check(event: Message | CallbackQuery) -> bool:
-    uid = event.from_user.id
-    return uid in settings.ADMIN_IDS
+    return event.from_user.id in settings.ADMIN_IDS
 
 
 router.message.filter(_admin_check)
@@ -97,12 +93,12 @@ router.callback_query.filter(_admin_check)
 
 @router.message(Command("admin"))
 async def cmd_admin(message: Message) -> None:
-    await message.answer("🔧 <b>Панель администратора</b>", reply_markup=admin_menu_kb())
+    await message.answer("🔧 <b>Панель администратора</b>", parse_mode="HTML", reply_markup=admin_menu_kb())
 
 
 @router.callback_query(F.data == "adm:menu")
 async def cb_admin_menu(callback: CallbackQuery) -> None:
-    await callback.message.edit_text("🔧 <b>Панель администратора</b>", reply_markup=admin_menu_kb())
+    await callback.message.edit_text("🔧 <b>Панель администратора</b>", parse_mode="HTML", reply_markup=admin_menu_kb())
     await callback.answer()
 
 
@@ -114,13 +110,13 @@ async def cb_stats(callback: CallbackQuery, session: AsyncSession) -> None:
     text = (
         "📊 <b>Статистика</b>\n\n"
         f"👥 Пользователей: <b>{s['users']}</b>\n"
-        f"🔑 Активных ключей: <b>{s['active_configs']}</b>\n"
-        f"📁 Всего ключей: <b>{s['total_configs']}</b>\n\n"
+        f"🔑 Активных подписок: <b>{s['active_subscriptions']}</b>\n"
+        f"📱 Устройств всего: <b>{s['total_devices']}</b>\n\n"
         f"⭐ Заработано Stars: <b>{s['total_stars'] or 0}</b>\n"
         f"💳 Платежей ЮKassa: <b>{s['yookassa_count'] or 0}</b>\n"
         f"₮ Крипто-платежей: <b>{s['crypto_count'] or 0}</b>"
     )
-    await callback.message.edit_text(text, reply_markup=back_admin_kb())
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=back_admin_kb())
     await callback.answer()
 
 
@@ -131,6 +127,7 @@ async def cb_payments(callback: CallbackQuery, session: AsyncSession) -> None:
     s = await get_all_settings(session)
     await callback.message.edit_text(
         "💳 <b>Способы оплаты</b>\n\nВыберите метод для управления:",
+        parse_mode="HTML",
         reply_markup=admin_payments_kb(
             stars=s.get("payment_stars_enabled", "1") == "1",
             yookassa=s.get("payment_yookassa_enabled", "0") == "1",
@@ -140,20 +137,21 @@ async def cb_payments(callback: CallbackQuery, session: AsyncSession) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("adm:pay:") & ~F.data.startswith("adm:pay:toggle:") & ~F.data.startswith("adm:pay:token:"))
+@router.callback_query(
+    F.data.startswith("adm:pay:")
+    & ~F.data.startswith("adm:pay:toggle:")
+    & ~F.data.startswith("adm:pay:token:")
+)
 async def cb_payment_detail(callback: CallbackQuery, session: AsyncSession) -> None:
-    method = callback.data.split(":")[2]  # stars / yookassa / crypto
+    method = callback.data.split(":")[2]
     enabled = await get_setting(session, f"payment_{method}_enabled", "0")
     token = await get_setting(session, f"payment_{method}_token", "")
-
     name = _PAY_NAMES.get(method, method)
     status = "✅ Включён" if enabled == "1" else "❌ Отключён"
-    token_line = ""
-    if method != "stars":
-        token_line = f"\nТокен: <code>{'задан' if token else 'не задан'}</code>"
-
+    token_line = f"\nТокен: <code>{'задан' if token else 'не задан'}</code>" if method != "stars" else ""
     await callback.message.edit_text(
         f"💳 <b>{name}</b>\n\nСтатус: {status}{token_line}",
+        parse_mode="HTML",
         reply_markup=admin_payment_detail_kb(method, enabled == "1"),
     )
     await callback.answer()
@@ -166,17 +164,15 @@ async def cb_toggle_payment(callback: CallbackQuery, session: AsyncSession) -> N
     current = await get_setting(session, key, "0")
     new_val = "0" if current == "1" else "1"
     await set_setting(session, key, new_val)
-
-    status = "включён ✅" if new_val == "1" else "отключён ❌"
-    name = _PAY_NAMES.get(method, method)
-    await callback.answer(f"{name} {status}", show_alert=True)
-
-    # Обновить экран
     enabled = new_val == "1"
+    name = _PAY_NAMES.get(method, method)
+    status = "включён ✅" if enabled else "отключён ❌"
+    await callback.answer(f"{name} {status}", show_alert=True)
     token = await get_setting(session, f"payment_{method}_token", "")
     token_line = f"\nТокен: <code>{'задан' if token else 'не задан'}</code>" if method != "stars" else ""
     await callback.message.edit_text(
         f"💳 <b>{name}</b>\n\nСтатус: {'✅ Включён' if enabled else '❌ Отключён'}{token_line}",
+        parse_mode="HTML",
         reply_markup=admin_payment_detail_kb(method, enabled),
     )
 
@@ -199,7 +195,7 @@ async def cb_edit_token_finish(message: Message, state: FSMContext, session: Asy
     await set_setting(session, f"payment_{method}_token", token)
     await state.clear()
     name = _PAY_NAMES.get(method, method)
-    await message.answer(f"✅ Токен для <b>{name}</b> обновлён.", reply_markup=back_admin_kb())
+    await message.answer(f"✅ Токен для <b>{name}</b> обновлён.", parse_mode="HTML", reply_markup=back_admin_kb())
 
 
 # ── Тарифы ──────────────────────────────────────────────────────
@@ -209,6 +205,7 @@ async def cb_plans(callback: CallbackQuery, session: AsyncSession) -> None:
     plans = await get_all_plans(session)
     await callback.message.edit_text(
         "📋 <b>Тарифы</b>\n\nВсе тарифы (✅ активны, ❌ скрыты от пользователей):",
+        parse_mode="HTML",
         reply_markup=admin_plans_kb(plans),
     )
     await callback.answer()
@@ -227,13 +224,13 @@ async def cb_plan_detail(callback: CallbackQuery, session: AsyncSession) -> None
         f"📋 <b>Тариф #{plan.id}</b>\n\n"
         f"Название: <b>{plan.label}</b>\n"
         f"Дней: <b>{plan.days}</b>\n"
-        f"Цена Stars: <b>{plan.stars_price} ⭐</b>\n"
+        f"Цена Stars/устр.: <b>{plan.stars_price} ⭐</b>\n"
         f"Цена рублей: <b>{rub_str}</b>\n"
         f"Цена USDT: <b>{usdt_str}</b>\n"
         f"Порядок: <b>{plan.sort_order}</b>\n"
         f"Статус: {'✅ Активен' if plan.is_active else '❌ Скрыт'}"
     )
-    await callback.message.edit_text(text, reply_markup=admin_plan_detail_kb(plan))
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=admin_plan_detail_kb(plan))
     await callback.answer()
 
 
@@ -249,17 +246,18 @@ async def cb_toggle_plan(callback: CallbackQuery, session: AsyncSession) -> None
     await callback.answer(f"Тариф {status}", show_alert=True)
     rub_str = f"{plan.rub_kopeks // 100}₽" if plan.rub_kopeks else "не задана"
     usdt_str = f"{plan.usdt_price} USDT" if plan.usdt_price else "не задана"
-    text = (
+    await callback.message.edit_text(
         f"📋 <b>Тариф #{plan.id}</b>\n\n"
         f"Название: <b>{plan.label}</b>\n"
         f"Дней: <b>{plan.days}</b>\n"
-        f"Цена Stars: <b>{plan.stars_price} ⭐</b>\n"
+        f"Цена Stars/устр.: <b>{plan.stars_price} ⭐</b>\n"
         f"Цена рублей: <b>{rub_str}</b>\n"
         f"Цена USDT: <b>{usdt_str}</b>\n"
         f"Порядок: <b>{plan.sort_order}</b>\n"
-        f"Статус: {'✅ Активен' if plan.is_active else '❌ Скрыт'}"
+        f"Статус: {'✅ Активен' if plan.is_active else '❌ Скрыт'}",
+        parse_mode="HTML",
+        reply_markup=admin_plan_detail_kb(plan),
     )
-    await callback.message.edit_text(text, reply_markup=admin_plan_detail_kb(plan))
 
 
 @router.callback_query(F.data.startswith("adm:plan:field:"))
@@ -289,7 +287,6 @@ async def cb_plan_field_finish(message: Message, state: FSMContext, session: Asy
     cast_name = data["cast"]
     field_label = data["field_label"]
     _, _, validator = _PLAN_FIELDS[field]
-
     try:
         cast = int if cast_name == "int" else str
         value = cast(message.text.strip())
@@ -298,11 +295,11 @@ async def cb_plan_field_finish(message: Message, state: FSMContext, session: Asy
     except (ValueError, TypeError):
         await message.answer("❌ Некорректное значение. Попробуйте ещё раз:")
         return
-
     await update_plan(session, plan_id, **{field: value})
     await state.clear()
     await message.answer(
         f"✅ Поле <b>{field_label}</b> обновлено на <b>{value}</b>.",
+        parse_mode="HTML",
         reply_markup=back_admin_kb(),
     )
 
@@ -310,20 +307,11 @@ async def cb_plan_field_finish(message: Message, state: FSMContext, session: Asy
 @router.callback_query(F.data.startswith("adm:plan:del:"))
 async def cb_plan_delete(callback: CallbackQuery, session: AsyncSession) -> None:
     plan_id = int(callback.data.split(":")[3])
-    plan = await get_plan_by_id(session, plan_id)
-    if not plan:
-        await callback.answer("Тариф не найден.", show_alert=True)
-        return
     await delete_plan(session, plan_id)
     await callback.answer("🗑️ Тариф удалён.", show_alert=True)
     plans = await get_all_plans(session)
-    await callback.message.edit_text(
-        "📋 <b>Тарифы</b>",
-        reply_markup=admin_plans_kb(plans),
-    )
+    await callback.message.edit_text("📋 <b>Тарифы</b>", parse_mode="HTML", reply_markup=admin_plans_kb(plans))
 
-
-# ── Добавить тариф (FSM) ────────────────────────────────────────
 
 @router.callback_query(F.data == "adm:plan:add")
 async def cb_plan_add_start(callback: CallbackQuery, state: FSMContext) -> None:
@@ -348,10 +336,9 @@ async def cb_plan_add_days(message: Message, state: FSMContext) -> None:
 
 @router.message(AdminStates.adding_plan_label)
 async def cb_plan_add_label(message: Message, state: FSMContext) -> None:
-    label = message.text.strip()[:64]
-    await state.update_data(label=label)
+    await state.update_data(label=message.text.strip()[:64])
     await state.set_state(AdminStates.adding_plan_stars)
-    await message.answer("Введите <b>цену в Telegram Stars</b>:", parse_mode="HTML")
+    await message.answer("Введите <b>цену в Telegram Stars за 1 устройство</b>:", parse_mode="HTML")
 
 
 @router.message(AdminStates.adding_plan_stars)
@@ -363,15 +350,13 @@ async def cb_plan_add_stars(message: Message, state: FSMContext, session: AsyncS
     except ValueError:
         await message.answer("❌ Введите целое число больше 0:")
         return
-
     data = await state.get_data()
     await state.clear()
-
     all_plans = await get_all_plans(session)
-    sort_order = len(all_plans)
-    plan = await create_plan(session, data["days"], data["label"], stars, sort_order)
+    plan = await create_plan(session, data["days"], data["label"], stars, sort_order=len(all_plans))
     await message.answer(
-        f"✅ Тариф <b>{plan.label}</b> ({plan.stars_price} ⭐) создан.",
+        f"✅ Тариф <b>{plan.label}</b> ({plan.stars_price} ⭐/устр.) создан.",
+        parse_mode="HTML",
         reply_markup=back_admin_kb(),
     )
 
@@ -384,9 +369,9 @@ async def cb_users(callback: CallbackQuery, session: AsyncSession) -> None:
     page = int(callback.data.split(":")[2])
     total = await count_users(session)
     users = await get_all_users(session, limit=per_page, offset=page * per_page)
-    text = f"👥 <b>Пользователи</b> (всего: {total})\nСтраница {page + 1}:"
     await callback.message.edit_text(
-        text,
+        f"👥 <b>Пользователи</b> (всего: {total})\nСтраница {page + 1}:",
+        parse_mode="HTML",
         reply_markup=admin_users_kb(users, page, total, per_page),
     )
     await callback.answer()
@@ -399,18 +384,25 @@ async def cb_user_detail(callback: CallbackQuery, session: AsyncSession) -> None
     if not user:
         await callback.answer("Пользователь не найден.", show_alert=True)
         return
-    active = sum(1 for c in user.configs if c.is_active)
+    sub = user.subscription
     username = f"@{user.username}" if user.username else "—"
+    sub_line = ""
+    if sub:
+        status = "✅ активна" if sub.is_active else "❌ неактивна"
+        expires = sub.expires_at.strftime("%d.%m.%Y")
+        sub_line = f"\nПодписка: {status}, до {expires}, {len(sub.devices)}/{sub.max_devices} устройств"
     text = (
         f"👤 <b>{user.full_name or username}</b>\n\n"
         f"Username: {username}\n"
         f"Chat ID: <code>{user.chat_id}</code>\n"
-        f"Ключей: {len(user.configs)} (активных: {active})\n"
         f"Статус: {'🚫 Заблокирован' if user.is_banned else '✅ Активен'}\n"
         f"Дата регистрации: {user.created_at.strftime('%d.%m.%Y')}"
+        f"{sub_line}"
     )
     await callback.message.edit_text(
-        text, reply_markup=admin_user_detail_kb(chat_id, user.is_banned)
+        text,
+        parse_mode="HTML",
+        reply_markup=admin_user_detail_kb(chat_id, user.is_banned, has_sub=bool(sub)),
     )
     await callback.answer()
 
@@ -426,172 +418,304 @@ async def cb_ban_user(callback: CallbackQuery, session: AsyncSession) -> None:
     await set_user_banned(session, chat_id, new_ban)
     status = "заблокирован 🚫" if new_ban else "разблокирован ✅"
     await callback.answer(f"Пользователь {status}", show_alert=True)
-    # Обновить экран
     user = await get_user_by_chat_id(session, chat_id)
-    active = sum(1 for c in user.configs if c.is_active)
+    sub = user.subscription
     username = f"@{user.username}" if user.username else "—"
-    text = (
+    sub_line = ""
+    if sub:
+        sub_status = "✅ активна" if sub.is_active else "❌ неактивна"
+        expires = sub.expires_at.strftime("%d.%m.%Y")
+        sub_line = f"\nПодписка: {sub_status}, до {expires}, {len(sub.devices)}/{sub.max_devices} устройств"
+    await callback.message.edit_text(
         f"👤 <b>{user.full_name or username}</b>\n\n"
         f"Username: {username}\n"
         f"Chat ID: <code>{user.chat_id}</code>\n"
-        f"Ключей: {len(user.configs)} (активных: {active})\n"
         f"Статус: {'🚫 Заблокирован' if user.is_banned else '✅ Активен'}\n"
         f"Дата регистрации: {user.created_at.strftime('%d.%m.%Y')}"
+        f"{sub_line}",
+        parse_mode="HTML",
+        reply_markup=admin_user_detail_kb(chat_id, user.is_banned, has_sub=bool(sub)),
     )
-    await callback.message.edit_text(text, reply_markup=admin_user_detail_kb(chat_id, user.is_banned))
 
 
-@router.callback_query(F.data.startswith("adm:user:configs:"))
-async def cb_user_configs(callback: CallbackQuery, session: AsyncSession) -> None:
+# ── Подписка пользователя ────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("adm:user:sub:"))
+async def cb_user_sub(callback: CallbackQuery, session: AsyncSession) -> None:
     chat_id = int(callback.data.split(":")[3])
     user = await get_user_by_chat_id(session, chat_id)
-    if not user:
-        await callback.answer("Пользователь не найден.", show_alert=True)
+    if not user or not user.subscription:
+        await callback.answer("Подписка не найдена.", show_alert=True)
         return
-    await callback.message.edit_text(
-        f"🔑 Ключи пользователя <b>{user.full_name or user.chat_id}</b>:",
-        reply_markup=admin_user_configs_kb(user.configs, chat_id),
-    )
-    await callback.answer()
+    sub = user.subscription
+    await _show_sub_detail(callback, sub, chat_id)
 
 
-@router.callback_query(F.data.regexp(r"^adm:cfg:\d+:\d+$"))
-async def cb_config_detail(callback: CallbackQuery, session: AsyncSession) -> None:
-    parts = callback.data.split(":")
-    config_id, user_chat_id = int(parts[2]), int(parts[3])
-    cfg = await get_config_by_id(session, config_id)
-    if not cfg:
-        await callback.answer("Ключ не найден.", show_alert=True)
-        return
-    status = "✅ Активен" if cfg.is_active else "❌ Деактивирован"
+async def _show_sub_detail(callback: CallbackQuery, sub, chat_id: int) -> None:
+    status = "✅ Активна" if sub.is_active else "❌ Неактивна"
+    expires = sub.expires_at.strftime("%d.%m.%Y %H:%M UTC")
+    devices_text = ""
+    for i, d in enumerate(sub.devices, 1):
+        devices_text += f"\n  {i}. {d.device_name}"
     text = (
-        f"🔑 <b>{cfg.device_name}</b>\n\n"
+        f"🔑 <b>Подписка #{sub.id}</b>\n\n"
         f"Статус: {status}\n"
-        f"Дней в тарифе: {cfg.plan_days}\n"
-        f"IP: <code>{cfg.peer_ip}</code>\n"
-        f"Истекает: {cfg.expires_at.strftime('%d.%m.%Y %H:%M UTC')}"
+        f"Дней в плане: {sub.plan_days}\n"
+        f"Истекает: <b>{expires}</b>\n"
+        f"Устройства ({len(sub.devices)}/{sub.max_devices}):{devices_text}"
     )
     await callback.message.edit_text(
-        text, reply_markup=admin_config_detail_kb(config_id, cfg.is_active, user_chat_id)
+        text, parse_mode="HTML", reply_markup=admin_sub_detail_kb(sub, chat_id)
     )
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("adm:cfg:send:"))
-async def cb_send_config(callback: CallbackQuery, session: AsyncSession) -> None:
+@router.callback_query(F.data.startswith("adm:sub:activate:"))
+async def cb_sub_activate(callback: CallbackQuery, session: AsyncSession) -> None:
     parts = callback.data.split(":")
-    config_id, user_chat_id = int(parts[3]), int(parts[4])
-    cfg = await get_config_by_id(session, config_id)
-    if not cfg:
-        await callback.answer("Ключ не найден.", show_alert=True)
+    sub_id, chat_id = int(parts[3]), int(parts[4])
+    await activate_subscription(session, sub_id)
+    await callback.answer("✅ Подписка активирована.", show_alert=True)
+    sub = await get_subscription_by_id(session, sub_id)
+    if sub:
+        await _show_sub_detail(callback, sub, chat_id)
+
+
+@router.callback_query(F.data.startswith("adm:sub:deactivate:"))
+async def cb_sub_deactivate(callback: CallbackQuery, session: AsyncSession) -> None:
+    parts = callback.data.split(":")
+    sub_id, chat_id = int(parts[3]), int(parts[4])
+    await deactivate_subscription(session, sub_id)
+    await callback.answer("❌ Подписка деактивирована.", show_alert=True)
+    sub = await get_subscription_by_id(session, sub_id)
+    if sub:
+        await _show_sub_detail(callback, sub, chat_id)
+
+
+@router.callback_query(F.data.startswith("adm:sub:send:"))
+async def cb_sub_send_url(callback: CallbackQuery, session: AsyncSession) -> None:
+    parts = callback.data.split(":")
+    sub_id, chat_id = int(parts[3]), int(parts[4])
+    sub = await get_subscription_by_id(session, sub_id)
+    if not sub:
+        await callback.answer("Подписка не найдена.", show_alert=True)
         return
+    sub_url = build_sub_url(sub.sub_token)
     try:
-        psk = cfg.peer_psk or extract_psk(cfg.config_text)
-        uri = build_client_uri(cfg.peer_private_key, cfg.peer_public_key, cfg.peer_ip, psk)
         await callback.bot.send_message(
-            user_chat_id,
-            f"📋 <b>Ключ: {cfg.device_name}</b>\n"
-            f"Действителен до: <b>{cfg.expires_at.strftime('%d.%m.%Y')}</b>\n\n"
-            f"Скопируйте и вставьте в Amnezia VPN (+ → Вставить ключ):\n\n"
-            f"<code>{uri}</code>",
+            chat_id,
+            f"📋 <b>Subscription URL</b>\n\n"
+            f"Добавьте в happ как подписку:\n\n"
+            f"<code>{sub_url}</code>\n\n"
+            f"<i>В happ: + → Добавить подписку → вставьте URL</i>",
             parse_mode="HTML",
         )
-        await callback.answer("✅ Ключ отправлен пользователю.", show_alert=True)
+        await callback.answer("✅ URL отправлен пользователю.", show_alert=True)
     except Exception as e:
         await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
 
 
-@router.callback_query(F.data.startswith("adm:cfg:rename:"))
-async def cb_rename_config_start(callback: CallbackQuery, state: FSMContext) -> None:
+@router.callback_query(F.data.startswith("adm:sub:delete:"))
+async def cb_sub_delete(callback: CallbackQuery, session: AsyncSession) -> None:
     parts = callback.data.split(":")
-    config_id, user_chat_id = int(parts[3]), int(parts[4])
-    await state.update_data(config_id=config_id, user_chat_id=user_chat_id)
-    await state.set_state(AdminStates.renaming_config)
-    await callback.message.answer("✏️ Введите новое название устройства:")
+    sub_id, chat_id = int(parts[3]), int(parts[4])
+    sub = await get_subscription_by_id(session, sub_id)
+    if not sub:
+        await callback.answer("Подписка не найдена.", show_alert=True)
+        return
+    uuids = await remove_all_devices(session, sub_id)
+    if uuids:
+        try:
+            await remove_xray_users(uuids)
+        except Exception as e:
+            logger.error("XRay remove error during sub delete: %s", e)
+    await session.delete(sub)
+    await session.commit()
+    try:
+        await callback.bot.send_message(
+            chat_id,
+            "❌ Ваша подписка была удалена администратором.",
+        )
+    except Exception:
+        pass
+    await callback.answer("🗑️ Подписка удалена.", show_alert=True)
+    user = await get_user_by_chat_id(session, chat_id)
+    if user:
+        username = f"@{user.username}" if user.username else "—"
+        await callback.message.edit_text(
+            f"👤 <b>{user.full_name or username}</b>\n\nПодписка удалена.",
+            parse_mode="HTML",
+            reply_markup=admin_user_detail_kb(chat_id, user.is_banned, has_sub=False),
+        )
+
+
+# ── Выдать подписку вручную ─────────────────────────────────────
+
+@router.callback_query(F.data.startswith("adm:user:give:"))
+async def cb_give_sub_start(callback: CallbackQuery, state: FSMContext) -> None:
+    chat_id = int(callback.data.split(":")[3])
+    await state.update_data(target_chat_id=chat_id)
+    await state.set_state(AdminStates.giving_sub_days)
+    await callback.message.answer(
+        "🎁 <b>Выдать подписку</b>\n\nВведите количество дней доступа:\n<i>0 = бессрочно (36500 дней)</i>",
+        parse_mode="HTML",
+    )
     await callback.answer()
 
 
-@router.message(AdminStates.renaming_config)
-async def cb_rename_config_finish(message: Message, state: FSMContext, session: AsyncSession) -> None:
+@router.message(AdminStates.giving_sub_days)
+async def cb_give_sub_days(message: Message, state: FSMContext) -> None:
+    try:
+        days = int(message.text.strip())
+        if days < 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Введите целое число >= 0:")
+        return
+    plan_days = 36500 if days == 0 else days
+    await state.update_data(plan_days=plan_days)
+    await state.set_state(AdminStates.giving_sub_devices)
+    await message.answer("Введите количество устройств:")
+
+
+@router.message(AdminStates.giving_sub_devices)
+async def cb_give_sub_devices(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    try:
+        device_count = int(message.text.strip())
+        if device_count < 1 or device_count > 20:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Введите число от 1 до 20:")
+        return
+
     data = await state.get_data()
-    config_id = data["config_id"]
-    user_chat_id = data["user_chat_id"]
-    new_name = message.text.strip()[:32]
     await state.clear()
+    target_chat_id = data["target_chat_id"]
+    plan_days = data["plan_days"]
 
-    cfg = await rename_config(session, config_id, new_name)
-    status = "✅ Активен" if cfg.is_active else "❌ Деактивирован"
-    await message.answer(
-        f"✅ Название изменено на <b>{new_name}</b>.\n\n"
-        f"🔑 <b>{cfg.device_name}</b>\n\n"
-        f"Статус: {status}\n"
-        f"Дней в тарифе: {cfg.plan_days}\n"
-        f"IP: <code>{cfg.peer_ip}</code>\n"
-        f"Истекает: {cfg.expires_at.strftime('%d.%m.%Y %H:%M UTC')}",
-        parse_mode="HTML",
-        reply_markup=admin_config_detail_kb(config_id, cfg.is_active, user_chat_id),
-    )
-
-
-@router.callback_query(F.data.startswith("adm:cfg:delete:"))
-async def cb_delete_config(callback: CallbackQuery, session: AsyncSession) -> None:
-    parts = callback.data.split(":")
-    config_id, user_chat_id = int(parts[3]), int(parts[4])
-    cfg = await get_config_by_id(session, config_id)
-    if not cfg:
-        await callback.answer("Конфиг не найден.", show_alert=True)
+    user = await get_user_by_chat_id(session, target_chat_id)
+    if not user:
+        await message.answer("❌ Пользователь не найден в базе. Пусть сначала напишет /start боту.")
         return
-    try:
-        if cfg.is_active:
-            await remove_peer(cfg.peer_public_key)
-        device_name = cfg.device_name
-        await delete_config(session, config_id)
-        try:
-            await callback.bot.send_message(
-                user_chat_id,
-                f"🗑️ Ваш ключ <b>{device_name}</b> был удалён администратором.",
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
-        await callback.answer("✅ Конфиг удалён.", show_alert=True)
-        user = await get_user_by_chat_id(session, user_chat_id)
-        if user:
-            await callback.message.edit_text(
-                f"🔑 Ключи пользователя <b>{user.full_name or user.chat_id}</b>:",
-                parse_mode="HTML",
-                reply_markup=admin_user_configs_kb(user.configs, user_chat_id),
-            )
-    except Exception as e:
-        logger.error("Error deleting config %d: %s", config_id, e)
-        await callback.answer("❌ Ошибка при удалении.", show_alert=True)
 
-
-@router.callback_query(F.data.startswith("adm:cfg:revoke:"))
-async def cb_revoke_config(callback: CallbackQuery, session: AsyncSession) -> None:
-    parts = callback.data.split(":")
-    config_id, user_chat_id = int(parts[3]), int(parts[4])
-    cfg = await get_config_by_id(session, config_id)
-    if not cfg or not cfg.is_active:
-        await callback.answer("Ключ уже деактивирован.", show_alert=True)
-        return
     try:
-        await remove_peer(cfg.peer_public_key)
-        await deactivate_config(session, config_id)
-        await callback.bot.send_message(
-            user_chat_id,
-            f"❌ Ваш ключ <b>{cfg.device_name}</b> был деактивирован администратором.",
+        existing_sub = await get_user_subscription(session, user.id)
+        if existing_sub:
+            old_uuids = await remove_all_devices(session, existing_sub.id)
+            if old_uuids:
+                await remove_xray_users(old_uuids)
+            await session.delete(existing_sub)
+            await session.commit()
+
+        sub = await create_subscription(
+            session,
+            user_id=user.id,
+            plan_days=plan_days,
+            max_devices=device_count,
+            base_device_price=0,
+            is_active=True,
+        )
+
+        uuids = []
+        for i in range(device_count):
+            uid = generate_uuid()
+            await add_device(session, sub.id, uid, device_name=f"Устройство {i + 1}")
+            uuids.append(uid)
+
+        await add_xray_users(uuids)
+
+        sub_url = build_sub_url(sub.sub_token)
+        expires_str = sub.expires_at.strftime("%d.%m.%Y")
+
+        await message.bot.send_message(
+            target_chat_id,
+            f"🎁 <b>Подписка выдана администратором</b>\n\n"
+            f"Устройств: <b>{device_count}</b>\n"
+            f"Действует до: <b>{expires_str}</b>\n\n"
+            f"📋 Subscription URL для happ:\n<code>{sub_url}</code>\n\n"
+            f"<i>В happ: + → Добавить подписку → вставьте URL</i>",
             parse_mode="HTML",
         )
-        await callback.answer("✅ Ключ отозван, пользователь уведомлён.", show_alert=True)
+        await message.answer(
+            f"✅ Подписка выдана пользователю <code>{target_chat_id}</code> на {plan_days} дней, {device_count} устройств.",
+            parse_mode="HTML",
+            reply_markup=back_admin_kb(),
+        )
     except Exception as e:
-        logger.error("Error revoking config %d: %s", config_id, e)
-        await callback.answer("❌ Ошибка при отзыве конфига.", show_alert=True)
+        logger.error("Error giving subscription to user %d: %s", target_chat_id, e)
+        await message.answer(f"❌ Ошибка при создании подписки: {e}", reply_markup=back_admin_kb())
+
+
+# ── HWID устройства (админ) ─────────────────────────────────────
+
+@router.callback_query(F.data.startswith("adm:sub:hwid:"))
+async def cb_sub_hwid_devices(callback: CallbackQuery, session: AsyncSession) -> None:
+    parts = callback.data.split(":")
+    sub_id, chat_id = int(parts[3]), int(parts[4])
+    sub = await get_subscription_by_id(session, sub_id)
+    if not sub:
+        await callback.answer("Подписка не найдена.", show_alert=True)
         return
-    cfg = await get_config_by_id(session, config_id)
+
+    hwid_devices = await get_hwid_devices_for_sub(session, sub_id)
+    if not hwid_devices:
+        await callback.message.edit_text(
+            f"📱 <b>HWID устройства подписки #{sub_id}</b>\n\nНи одно устройство ещё не подключалось.",
+            parse_mode="HTML",
+            reply_markup=admin_hwid_devices_kb(hwid_devices, sub_id, chat_id),
+        )
+        await callback.answer()
+        return
+
+    lines = []
+    for d in hwid_devices:
+        icon = "🚫" if d.is_blocked else "✅"
+        model = d.device_model or "—"
+        os_info = f"{d.device_os} {d.os_version}" if d.device_os else "—"
+        last = d.last_seen.strftime("%d.%m.%Y %H:%M")
+        lines.append(f"{icon} <b>{model}</b> · {os_info}\n   <i>последний визит: {last}</i>")
+
+    active = sum(1 for d in hwid_devices if not d.is_blocked)
     await callback.message.edit_text(
-        f"🔑 <b>{cfg.device_name}</b>\n\nСтатус: ❌ Деактивирован",
-        reply_markup=admin_config_detail_kb(config_id, False, user_chat_id),
+        f"📱 <b>HWID устройства подписки #{sub_id}</b> ({active}/{sub.max_devices})\n\n"
+        + "\n\n".join(lines)
+        + "\n\n<i>Нажмите на устройство чтобы заблокировать/разблокировать.</i>",
+        parse_mode="HTML",
+        reply_markup=admin_hwid_devices_kb(hwid_devices, sub_id, chat_id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm:hwid:toggle:"))
+async def cb_hwid_toggle(callback: CallbackQuery, session: AsyncSession) -> None:
+    parts = callback.data.split(":")
+    hwid_device_id, sub_id, chat_id = int(parts[3]), int(parts[4]), int(parts[5])
+    device = await get_hwid_device_by_id(session, hwid_device_id)
+    if not device:
+        await callback.answer("Устройство не найдено.", show_alert=True)
+        return
+    new_blocked = not device.is_blocked
+    await block_hwid_device(session, hwid_device_id, new_blocked)
+    status = "заблокировано 🚫" if new_blocked else "разблокировано ✅"
+    await callback.answer(f"Устройство {status}", show_alert=True)
+
+    # Обновить список
+    sub = await get_subscription_by_id(session, sub_id)
+    hwid_devices = await get_hwid_devices_for_sub(session, sub_id)
+    active = sum(1 for d in hwid_devices if not d.is_blocked)
+    lines = []
+    for d in hwid_devices:
+        icon = "🚫" if d.is_blocked else "✅"
+        model = d.device_model or "—"
+        os_info = f"{d.device_os} {d.os_version}" if d.device_os else "—"
+        last = d.last_seen.strftime("%d.%m.%Y %H:%M")
+        lines.append(f"{icon} <b>{model}</b> · {os_info}\n   <i>последний визит: {last}</i>")
+    await callback.message.edit_text(
+        f"📱 <b>HWID устройства подписки #{sub_id}</b> ({active}/{sub.max_devices})\n\n"
+        + "\n\n".join(lines)
+        + "\n\n<i>Нажмите на устройство чтобы заблокировать/разблокировать.</i>",
+        parse_mode="HTML",
+        reply_markup=admin_hwid_devices_kb(hwid_devices, sub_id, chat_id),
     )
 
 
@@ -633,100 +757,15 @@ async def cmd_reply(message: Message) -> None:
     except ValueError:
         await message.answer("❌ Некорректный chat_id")
         return
-    reply_text = parts[2]
     try:
         await message.bot.send_message(
             target_chat_id,
-            f"💬 <b>Ответ поддержки:</b>\n\n{reply_text}",
+            f"💬 <b>Ответ поддержки:</b>\n\n{parts[2]}",
             parse_mode="HTML",
         )
         await message.answer("✅ Ответ отправлен.")
     except Exception as e:
         await message.answer(f"❌ Ошибка при отправке: {e}")
-
-
-# ── Выдать конфиг вручную ───────────────────────────────────────
-
-@router.callback_query(F.data.startswith("adm:user:give:"))
-async def cb_give_config_start(callback: CallbackQuery, state: FSMContext) -> None:
-    chat_id = int(callback.data.split(":")[3])
-    await state.update_data(target_chat_id=chat_id)
-    await state.set_state(AdminStates.giving_config_device)
-    await callback.message.answer("✏️ Введите название устройства для ключа (например: iPhone, Ноутбук):")
-    await callback.answer()
-
-
-@router.message(AdminStates.giving_config_device)
-async def cb_give_config_device(message: Message, state: FSMContext) -> None:
-    device_name = message.text.strip()[:32]
-    await state.update_data(device_name=device_name)
-    await state.set_state(AdminStates.giving_config_days)
-    await message.answer(
-        "Введите количество дней доступа для ключа.\n"
-        "<i>0 = бессрочно (36500 дней)</i>",
-        parse_mode="HTML",
-    )
-
-
-@router.message(AdminStates.giving_config_days)
-async def cb_give_config_days(message: Message, state: FSMContext, session: AsyncSession) -> None:
-    try:
-        days = int(message.text.strip())
-        if days < 0:
-            raise ValueError
-    except ValueError:
-        await message.answer("❌ Введите целое число >= 0:")
-        return
-
-    data = await state.get_data()
-    await state.clear()
-
-    plan_days = 36500 if days == 0 else days
-    target_chat_id = data["target_chat_id"]
-    device_name = data["device_name"]
-
-    user = await get_user_by_chat_id(session, target_chat_id)
-    if not user:
-        await message.answer("❌ Пользователь не найден в базе. Пусть сначала напишет /start боту.")
-        return
-
-    try:
-        used_ips = await get_used_ips(session)
-        priv_key, pub_key = generate_keypair()
-        psk = generate_psk()
-        peer_ip = allocate_ip(used_ips)
-        config_text = build_client_config(priv_key, peer_ip, psk)
-
-        config = await create_config(
-            session, user.id, device_name,
-            pub_key, priv_key, peer_ip, config_text, plan_days,
-            psk=psk, is_active=False,
-        )
-        try:
-            await add_peer(pub_key, peer_ip, psk)
-        except Exception:
-            await delete_config(session, config.id)
-            raise
-        await activate_config(session, config.id)
-
-        uri = build_client_uri(priv_key, pub_key, peer_ip, psk)
-        await message.bot.send_message(
-            target_chat_id,
-            f"🎁 <b>Ключ выдан администратором</b>\n\n"
-            f"Устройство: <b>{device_name}</b>\n"
-            f"Действителен до: <b>{config.expires_at.strftime('%d.%m.%Y')}</b>\n\n"
-            f"Скопируйте и вставьте в Amnezia VPN (+ → Вставить ключ):\n\n"
-            f"<code>{uri}</code>",
-            parse_mode="HTML",
-        )
-        await message.answer(
-            f"✅ Ключ создан и отправлен пользователю <code>{target_chat_id}</code>.",
-            parse_mode="HTML",
-            reply_markup=back_admin_kb(),
-        )
-    except Exception as e:
-        logger.error("Error giving config to user %d: %s", target_chat_id, e)
-        await message.answer(f"❌ Ошибка при создании конфига: {e}", reply_markup=back_admin_kb())
 
 
 # ── Рассылка ────────────────────────────────────────────────────
