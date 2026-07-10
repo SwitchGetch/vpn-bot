@@ -616,13 +616,9 @@ async def cb_give_sub_devices(message: Message, state: FSMContext, session: Asyn
             is_active=True,
         )
 
-        uuids = []
-        for i in range(device_count):
-            uid = generate_uuid()
-            await add_device(session, sub.id, uid, device_name=f"Устройство {i + 1}")
-            uuids.append(uid)
-
-        await add_xray_users(uuids)
+        xray_uuid = generate_uuid()
+        await add_device(session, sub.id, xray_uuid)
+        await add_xray_users([xray_uuid])
 
         sub_url = build_sub_url(sub.sub_token)
         expires_str = sub.expires_at.strftime("%d.%m.%Y")

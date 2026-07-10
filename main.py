@@ -94,7 +94,7 @@ async def handle_subscription(request: web.Request) -> web.Response:
         # иначе timestamp() посчитает от локального времени сервера
         expire_ts = int(sub.expires_at.replace(tzinfo=timezone.utc).timestamp())
         lines = [
-            build_vless_uri(d.xray_uuid, f"{settings.SUB_SERVICE_NAME} — {d.device_name}")
+            build_vless_uri(d.xray_uuid, settings.SUB_SERVICE_NAME)
             for d in sub.devices
         ]
 

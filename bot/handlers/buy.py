@@ -484,10 +484,11 @@ async def payment_success(message: Message, state: FSMContext, session: AsyncSes
                 )
                 sub_id = sub.id
 
-            uuids = [generate_uuid() for _ in range(device_count)]
-            for i, u in enumerate(uuids, 1):
-                await add_device(session, sub_id, u, f"Устройство {i}")
-            await add_xray_users(uuids)
+            # Один XRay-ключ на подписку: в happ отображается один сервер,
+            # лимит устройств обеспечивается HWID-механизмом сабсервера
+            xray_uuid = generate_uuid()
+            await add_device(session, sub_id, xray_uuid)
+            await add_xray_users([xray_uuid])
             await activate_subscription(session, sub_id)
 
             await create_payment(
@@ -537,10 +538,6 @@ async def payment_success(message: Message, state: FSMContext, session: AsyncSes
             sub = await get_user_subscription(session, user.id)
             if not sub:
                 raise ValueError("Подписка не найдена")
-            new_uuids = [generate_uuid() for _ in range(extra_devices)]
-            for i, u in enumerate(new_uuids, sub.max_devices + 1):
-                await add_device(session, sub.id, u, f"Устройство {i}")
-            await add_xray_users(new_uuids)
             await update_subscription_devices(session, sub.id, sub.max_devices + extra_devices)
             await create_payment(
                 session, user.id, sub.id,
@@ -552,8 +549,8 @@ async def payment_success(message: Message, state: FSMContext, session: AsyncSes
             )
             await message.answer(
                 f"✅ <b>Добавлено {extra_devices} устройств!</b>\n\n"
-                f"Теперь у вас <b>{sub.max_devices + extra_devices}</b> устройств.\n"
-                f"Обновите подписку в happ.",
+                f"Теперь можно подключить до <b>{sub.max_devices + extra_devices}</b> устройств "
+                f"по той же ссылке.",
                 parse_mode="HTML",
             )
 

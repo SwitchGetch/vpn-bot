@@ -131,12 +131,9 @@ async def check_crypto_payments(bot: Bot) -> None:
                         base_device_price=inv.base_device_price,
                         is_active=True,
                     )
-                    uuids = []
-                    for i in range(inv.device_count):
-                        uid = generate_uuid()
-                        await add_device(session, sub.id, uid, device_name=f"Устройство {i + 1}")
-                        uuids.append(uid)
-                    await add_xray_users(uuids)
+                    xray_uuid = generate_uuid()
+                    await add_device(session, sub.id, xray_uuid)
+                    await add_xray_users([xray_uuid])
 
                     await create_payment(
                         session, user.id, sub.id,
@@ -190,13 +187,6 @@ async def check_crypto_payments(bot: Bot) -> None:
                     if not sub:
                         await delete_crypto_pending(session, inv.cryptopay_invoice_id)
                         continue
-                    uuids = []
-                    current_count = len(sub.devices)
-                    for i in range(inv.device_count):
-                        uid = generate_uuid()
-                        await add_device(session, sub.id, uid, device_name=f"Устройство {current_count + i + 1}")
-                        uuids.append(uid)
-                    await add_xray_users(uuids)
                     await update_subscription_devices(session, sub.id, sub.max_devices + inv.device_count)
                     await create_payment(
                         session, user.id, sub.id,
